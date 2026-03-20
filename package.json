@@ -1,0 +1,7 @@
+{
+  "name": "sxp-bridge-app",
+  "private": true,
+  "scripts": {
+    "start": "node server/src/index.js"
+  }
+}
