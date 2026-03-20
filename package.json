@@ -1,0 +1,1 @@
+{ "name":"client","scripts":{"dev":"vite"},"dependencies":{"react":"^18"}}
