@@ -1,0 +1,11 @@
+{
+  "name": "sxp-bridge-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server/src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
