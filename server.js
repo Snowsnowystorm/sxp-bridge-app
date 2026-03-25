@@ -14,9 +14,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ========================= */
-/* 🔐 ENV */
-/* ========================= */
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -51,34 +48,29 @@ app.get("/api/health", async (req, res) => {
 /* 🔐 AUTH */
 /* ========================= */
 app.post("/api/auth/register", async (req, res) => {
-  try {
-    const { email, password } = req.body;
+  const { email, password } = req.body;
 
-    const hashed = await bcrypt.hash(password, 10);
+  const hashed = await bcrypt.hash(password, 10);
 
-    const ethWallet = ethers.Wallet.createRandom();
-    const bnbWallet = ethers.Wallet.createRandom();
+  const ethWallet = ethers.Wallet.createRandom();
+  const bnbWallet = ethers.Wallet.createRandom();
 
-    const result = await pool.query(
-      `INSERT INTO users 
-      (email, password, eth_address, bnb_address, eth_private_key, bnb_private_key)
-      VALUES ($1,$2,$3,$4,$5,$6)
-      RETURNING id, email, eth_address, bnb_address`,
-      [
-        email,
-        hashed,
-        ethWallet.address,
-        bnbWallet.address,
-        ethWallet.privateKey,
-        bnbWallet.privateKey
-      ]
-    );
+  const result = await pool.query(
+    `INSERT INTO users 
+    (email, password, eth_address, bnb_address, eth_private_key, bnb_private_key)
+    VALUES ($1,$2,$3,$4,$5,$6)
+    RETURNING id, email, eth_address, bnb_address`,
+    [
+      email,
+      hashed,
+      ethWallet.address,
+      bnbWallet.address,
+      ethWallet.privateKey,
+      bnbWallet.privateKey
+    ]
+  );
 
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Registration failed" });
-  }
+  res.json(result.rows[0]);
 });
 
 app.post("/api/auth/login", async (req, res) => {
@@ -96,17 +88,13 @@ app.post("/api/auth/login", async (req, res) => {
   const valid = await bcrypt.compare(password, user.password);
   if (!valid) return res.status(401).json({ error: "Invalid password" });
 
-  const token = jwt.sign(
-    { id: user.id },
-    JWT_SECRET,
-    { expiresIn: "2h" }
-  );
+  const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: "2h" });
 
   res.json({ success: true, token });
 });
 
 /* ========================= */
-/* 🔑 AUTH MIDDLEWARE */
+/* 🔑 AUTH */
 /* ========================= */
 const verifyToken = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
@@ -140,51 +128,89 @@ app.get("/api/user/balance", verifyToken, async (req, res) => {
 });
 
 /* ========================= */
-/* 💰 DEPOSIT POLLING (SAFE) */
+/* 💰 REAL SXP DEPOSIT ENGINE */
 /* ========================= */
+
 const provider = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
+
+const SXP_ABI = [
+  "event Transfer(address indexed from, address indexed to, uint256 value)"
+];
+
+const sxpContract = new ethers.Contract(
+  process.env.SXP_ETH_CONTRACT,
+  SXP_ABI,
+  provider
+);
+
+let lastCheckedBlock = null;
+
+async function processTransfer(to, amount, txHash) {
+  const user = await pool.query(
+    `SELECT id FROM users WHERE LOWER(eth_address)=LOWER($1)`,
+    [to]
+  );
+
+  if (!user.rows.length) return;
+
+  const exists = await pool.query(
+    "SELECT id FROM transactions WHERE tx_hash=$1",
+    [txHash]
+  );
+
+  if (exists.rows.length) return;
+
+  const value = Number(ethers.formatUnits(amount, 18));
+
+  await pool.query(
+    "UPDATE users SET balance = balance + $1 WHERE id=$2",
+    [value, user.rows[0].id]
+  );
+
+  await pool.query(
+    "INSERT INTO transactions (user_id, tx_hash, amount, network, type, status) VALUES ($1,$2,$3,'ETH','deposit','completed')",
+    [user.rows[0].id, txHash, value]
+  );
+
+  console.log(`💰 Deposit: ${value} SXP`);
+}
 
 async function pollDeposits() {
   try {
-    console.log("🔄 Checking deposits...");
+    console.log("🔄 Checking SXP deposits...");
+
     const latest = await provider.getBlockNumber();
-    console.log("Latest block:", latest);
+
+    if (!lastCheckedBlock) {
+      lastCheckedBlock = latest - 20;
+    }
+
+    const logs = await provider.getLogs({
+      address: process.env.SXP_ETH_CONTRACT,
+      fromBlock: lastCheckedBlock,
+      toBlock: latest
+    });
+
+    for (const log of logs) {
+      try {
+        const parsed = sxpContract.interface.parseLog(log);
+
+        await processTransfer(
+          parsed.args.to,
+          parsed.args.value,
+          log.transactionHash
+        );
+      } catch {}
+    }
+
+    lastCheckedBlock = latest;
+
   } catch (err) {
     console.error("Polling error:", err.message);
   }
 }
 
-setInterval(pollDeposits, 180000);
-
-/* ========================= */
-/* 💸 WITHDRAW (BASIC) */
-/* ========================= */
-app.post("/api/user/withdraw", verifyToken, async (req, res) => {
-  try {
-    const { amount } = req.body;
-
-    const userRes = await pool.query(
-      "SELECT balance FROM users WHERE id=$1",
-      [req.user.id]
-    );
-
-    const user = userRes.rows[0];
-
-    if (Number(user.balance) < Number(amount)) {
-      return res.status(400).json({ error: "Insufficient balance" });
-    }
-
-    await pool.query(
-      "UPDATE users SET balance = balance - $1 WHERE id=$2",
-      [amount, req.user.id]
-    );
-
-    res.json({ success: true, message: "Withdrawal simulated" });
-
-  } catch (err) {
-    res.status(500).json({ error: "Withdrawal failed" });
-  }
-});
+setInterval(pollDeposits, 120000);
 
 /* ========================= */
 /* 🚀 START */
