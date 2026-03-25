@@ -17,6 +17,11 @@ app.use(express.json());
 console.log("🚀 Booting SXP Bridge Backend...");
 
 /* =========================
+   DEBUG ENV (TEMP)
+========================= */
+console.log("DB URL:", process.env.DATABASE_URL);
+
+/* =========================
    DATABASE
 ========================= */
 const pool = new Pool({
@@ -26,7 +31,10 @@ const pool = new Pool({
 
 pool.connect()
   .then(() => console.log("✅ DB connected"))
-  .catch(err => console.error("❌ DB error:", err));
+  .catch(err => {
+    console.error("❌ DB error:", err);
+    process.exit(1);
+  });
 
 /* =========================
    BLOCKCHAIN
@@ -44,16 +52,14 @@ const sxpContract = new ethers.Contract(
 let lastCheckedBlock = null;
 
 /* =========================
-   AUTH MIDDLEWARE
+   AUTH
 ========================= */
 function auth(req, res, next) {
   const token = req.headers.authorization?.split(" ")[1];
-
   if (!token) return res.status(401).json({ error: "No token" });
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
     next();
   } catch {
     res.status(401).json({ error: "Invalid token" });
@@ -61,18 +67,14 @@ function auth(req, res, next) {
 }
 
 /* =========================
-   HEALTH CHECK
+   HEALTH
 ========================= */
 app.get("/api/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
-    res.json({
-      status: "ok",
-      db: "connected",
-      time: new Date()
-    });
+    res.json({ status: "ok", db: "connected", time: new Date() });
   } catch {
-    res.status(500).json({ status: "error", db: "down" });
+    res.status(500).json({ status: "error" });
   }
 });
 
@@ -83,23 +85,16 @@ app.post("/api/auth/register", async (req, res) => {
   const { email, password } = req.body;
 
   const hashed = await bcrypt.hash(password, 10);
-
   const wallet = ethers.Wallet.createRandom();
 
-  try {
-    const result = await pool.query(
-      `INSERT INTO users (email, password, eth_address, private_key)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, email, eth_address`,
-      [email, hashed, wallet.address, wallet.privateKey]
-    );
+  const result = await pool.query(
+    `INSERT INTO users (email, password, eth_address, private_key)
+     VALUES ($1,$2,$3,$4)
+     RETURNING id,email,eth_address`,
+    [email, hashed, wallet.address.toLowerCase(), wallet.privateKey]
+  );
 
-    res.json(result.rows[0]);
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Register failed" });
-  }
+  res.json(result.rows[0]);
 });
 
 /* =========================
@@ -108,10 +103,7 @@ app.post("/api/auth/register", async (req, res) => {
 app.post("/api/auth/login", async (req, res) => {
   const { email, password } = req.body;
 
-  const user = await pool.query(
-    "SELECT * FROM users WHERE email=$1",
-    [email]
-  );
+  const user = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
 
   if (!user.rows.length) return res.status(401).json({ error: "Invalid" });
 
@@ -129,7 +121,7 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 /* =========================
-   GET WALLET
+   WALLET
 ========================= */
 app.get("/api/user/wallets", auth, async (req, res) => {
   const user = await pool.query(
@@ -141,7 +133,7 @@ app.get("/api/user/wallets", auth, async (req, res) => {
 });
 
 /* =========================
-   GET BALANCE
+   BALANCE
 ========================= */
 app.get("/api/user/balance", auth, async (req, res) => {
   const result = await pool.query(
@@ -164,18 +156,17 @@ async function processTransfer(to, value, txHash) {
 
     if (!user.rows.length) return;
 
-    const amount = Number(ethers.formatUnits(value, 18));
-
     const exists = await pool.query(
-      "SELECT * FROM transactions WHERE tx_hash=$1",
+      "SELECT 1 FROM transactions WHERE tx_hash=$1",
       [txHash]
     );
 
     if (exists.rows.length) return;
 
+    const amount = Number(ethers.formatUnits(value, 18));
+
     await pool.query(
-      `INSERT INTO transactions (user_id, amount, tx_hash)
-       VALUES ($1, $2, $3)`,
+      "INSERT INTO transactions (user_id, amount, tx_hash) VALUES ($1,$2,$3)",
       [user.rows[0].id, amount, txHash]
     );
 
@@ -187,7 +178,7 @@ async function processTransfer(to, value, txHash) {
 }
 
 /* =========================
-   SAFE POLLING ENGINE (FIXED)
+   SAFE POLLING (FINAL FIX)
 ========================= */
 async function pollDeposits() {
   try {
@@ -195,22 +186,14 @@ async function pollDeposits() {
 
     const latest = await provider.getBlockNumber();
 
-    if (!lastCheckedBlock) {
-      lastCheckedBlock = latest - 10;
-    }
+    if (!lastCheckedBlock) lastCheckedBlock = latest - 5;
+    if (lastCheckedBlock > latest) lastCheckedBlock = latest - 5;
 
-    const fromBlock = Math.max(lastCheckedBlock, latest - 10);
-
-    const logs = await Promise.race([
-      provider.getLogs({
-        address: process.env.SXP_ETH_CONTRACT,
-        fromBlock,
-        toBlock: latest
-      }),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("RPC timeout")), 5000)
-      )
-    ]);
+    const logs = await provider.getLogs({
+      address: process.env.SXP_ETH_CONTRACT,
+      fromBlock: lastCheckedBlock,
+      toBlock: latest
+    });
 
     for (const log of logs) {
       try {
@@ -231,13 +214,10 @@ async function pollDeposits() {
   }
 }
 
-/* =========================
-   START POLLING
-========================= */
 setInterval(pollDeposits, 180000);
 
 /* =========================
-   START SERVER
+   START
 ========================= */
 const PORT = process.env.PORT || 3000;
 
