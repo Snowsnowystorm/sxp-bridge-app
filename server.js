@@ -18,7 +18,7 @@ app.use(express.json());
 /* ========================= */
 /* 🔐 ENV */
 /* ========================= */
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET;
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
@@ -31,7 +31,7 @@ const pool = new Pool({
 });
 
 /* ========================= */
-/* 🌐 BLOCKCHAIN PROVIDERS */
+/* 🌐 PROVIDERS */
 /* ========================= */
 const ethProvider = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
 const bscProvider = new ethers.JsonRpcProvider(process.env.BSC_RPC_URL);
@@ -200,7 +200,7 @@ app.get("/api/user/balance", verifyToken, async (req, res) => {
 });
 
 /* ========================= */
-/* 💰 DEPOSIT ENGINE */
+/* 💰 DEPOSIT ENGINE (SAFE POLLING) */
 /* ========================= */
 async function processTransfer(network, to, amount, txHash) {
   try {
@@ -236,22 +236,44 @@ async function processTransfer(network, to, amount, txHash) {
 
     console.log(`💰 Deposit: ${value} SXP → user ${userId}`);
   } catch (err) {
-    console.error("Deposit error:", err);
+    console.error("Deposit error:", err.message);
   }
 }
 
-/* LISTENERS */
-function startListeners() {
-  console.log("🚀 Listening for SXP deposits...");
+/* POLLING (STABLE) */
+async function pollDeposits() {
+  try {
+    console.log("🔄 Checking deposits...");
 
-  sxpEthContract.on("Transfer", (from, to, value, event) => {
-    processTransfer("ETH", to, value, event.log.transactionHash);
-  });
+    const latest = await ethProvider.getBlockNumber();
 
-  sxpBnbContract.on("Transfer", (from, to, value, event) => {
-    processTransfer("BNB", to, value, event.log.transactionHash);
-  });
+    const logs = await ethProvider.getLogs({
+      address: process.env.SXP_ETH_CONTRACT,
+      fromBlock: latest - 20,
+      toBlock: latest
+    });
+
+    for (const log of logs) {
+      try {
+        const parsed = sxpEthContract.interface.parseLog(log);
+
+        await processTransfer(
+          "ETH",
+          parsed.args.to,
+          parsed.args.value,
+          log.transactionHash
+        );
+      } catch {
+        // ignore safely
+      }
+    }
+  } catch (err) {
+    console.error("Polling error:", err.message);
+  }
 }
+
+/* RUN EVERY 60s */
+setInterval(pollDeposits, 60000);
 
 /* ========================= */
 /* 💸 WITHDRAW */
@@ -310,7 +332,7 @@ app.post("/api/user/withdraw", verifyToken, async (req, res) => {
 
     res.json({ success: true, txHash: tx.hash });
   } catch (err) {
-    console.error(err);
+    console.error("Withdrawal error:", err.message);
     res.status(500).json({ error: "Withdrawal failed" });
   }
 });
@@ -318,7 +340,6 @@ app.post("/api/user/withdraw", verifyToken, async (req, res) => {
 /* ========================= */
 /* 🚀 START */
 /* ========================= */
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
-  startListeners();
 });
