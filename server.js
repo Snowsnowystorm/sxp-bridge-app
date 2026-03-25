@@ -19,9 +19,14 @@ const client = new MongoClient(process.env.DATABASE_URL);
 let db;
 
 async function connectDB() {
-  await client.connect();
-  db = client.db("sxp_bridge");
-  console.log("✅ DB connected");
+  try {
+    await client.connect();
+    db = client.db("sxp_bridge");
+    console.log("✅ DB connected");
+  } catch (err) {
+    console.error("❌ DB connection failed:", err);
+    process.exit(1);
+  }
 }
 
 // ===============================
@@ -59,90 +64,114 @@ app.post("/api/users/create", async (req, res) => {
 });
 
 // ===============================
+// 📊 GET USER (FOR TESTING)
+// ===============================
+app.get("/api/users/:wallet", async (req, res) => {
+  try {
+    const user = await db.collection("users").findOne({
+      walletAddress: req.params.wallet
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.json(user);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Fetch failed" });
+  }
+});
+
+// ===============================
 // 💰 CREDIT USER FUNCTION
 // ===============================
 async function creditUser(walletAddress, amount, txHash) {
-  const existing = await db.collection("transactions").findOne({ txHash });
-  if (existing) return;
+  try {
+    const existing = await db.collection("transactions").findOne({ txHash });
+    if (existing) return;
 
-  const user = await db.collection("users").findOne({ walletAddress });
-  if (!user) {
-    console.log("⚠️ Unknown wallet:", walletAddress);
-    return;
+    const user = await db.collection("users").findOne({ walletAddress });
+    if (!user) {
+      console.log("⚠️ Unknown wallet:", walletAddress);
+      return;
+    }
+
+    await db.collection("users").updateOne(
+      { walletAddress },
+      { $inc: { "balances.sxp_eth": parseFloat(amount) } }
+    );
+
+    await db.collection("transactions").insertOne({
+      walletAddress,
+      amount,
+      txHash,
+      type: "deposit",
+      createdAt: new Date()
+    });
+
+    console.log("💰 CREDITED:", walletAddress, amount);
+
+  } catch (err) {
+    console.error("Credit error:", err);
   }
-
-  await db.collection("users").updateOne(
-    { walletAddress },
-    { $inc: { "balances.sxp_eth": parseFloat(amount) } }
-  );
-
-  await db.collection("transactions").insertOne({
-    walletAddress,
-    amount,
-    txHash,
-    type: "deposit",
-    createdAt: new Date()
-  });
-
-  console.log("💰 CREDITED:", walletAddress, amount);
 }
 
 // ===============================
-// 🔥 SXP DEPOSIT LISTENER (REAL)
+// 🔥 SXP DEPOSIT LISTENER (FIXED)
 // ===============================
 function startDepositListener() {
-  const provider = new ethers.WebSocketProvider(process.env.ALCHEMY_WS);
+  try {
+    const provider = new ethers.WebSocketProvider(process.env.ALCHEMY_WS);
 
-  const abi = [
-    "event Transfer(address indexed from, address indexed to, uint256 value)"
-  ];
+    const abi = [
+      "event Transfer(address indexed from, address indexed to, uint256 value)"
+    ];
 
-  const contract = new ethers.Contract(
-    process.env.SXP_ETH_CONTRACT,
-    abi,
-    provider
-  );
+    const contract = new ethers.Contract(
+      process.env.SXP_ETH_CONTRACT,
+      abi,
+      provider
+    );
 
-  console.log("🚀 Listening for SXP deposits...");
+    console.log("🚀 Listening for SXP deposits...");
 
-  contract.on("Transfer", async (from, to, value, event) => {
-    try {
-      const amount = ethers.formatUnits(value, 18);
+    contract.on("Transfer", async (from, to, value, event) => {
+      try {
+        const amount = ethers.formatUnits(value, 18);
 
-      // 🔥 CHECK IF USER EXISTS
-      const user = await db.collection("users").findOne({
-        walletAddress: to
-      });
+        const user = await db.collection("users").findOne({
+          walletAddress: to
+        });
 
-      if (!user) return;
+        if (!user) return;
 
-      console.log("🔥 DEPOSIT DETECTED");
-      console.log({
-        from,
-        to,
-        amount,
-        txHash: event.log.transactionHash
-      });
+        console.log("🔥 DEPOSIT DETECTED", {
+          from,
+          to,
+          amount,
+          txHash: event.log.transactionHash
+        });
 
-      await creditUser(
-        to,
-        amount,
-        event.log.transactionHash
-      );
+        await creditUser(
+          to,
+          amount,
+          event.log.transactionHash
+        );
 
-    } catch (err) {
-      console.error("Listener error:", err);
-    }
-  });
+      } catch (err) {
+        console.error("Listener error:", err);
+      }
+    });
 
-  provider.on("error", (err) => {
-  console.error("WebSocket error:", err);
-});
+    // ✅ SAFE EVENT HANDLING (NO CRASH)
+    provider.on("error", (err) => {
+      console.error("⚠️ Provider error:", err);
+    });
 
-provider.on("close", () => {
-  console.log("⚠️ WebSocket closed");
-});
-
+  } catch (err) {
+    console.error("❌ Listener failed to start:", err);
+  }
 }
 
 // ===============================
@@ -160,8 +189,8 @@ async function startServer() {
 
   startDepositListener();
 
-  app.listen(process.env.PORT, () => {
-    console.log(`🚀 Server running on port ${process.env.PORT}`);
+  app.listen(process.env.PORT || 3000, () => {
+    console.log(`🚀 Server running on port ${process.env.PORT || 3000}`);
   });
 }
 
