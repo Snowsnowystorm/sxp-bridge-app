@@ -14,167 +14,181 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET;
+console.log("🚀 Booting SXP Bridge Backend...");
 
-/* ========================= */
-/* 🧠 DATABASE */
-/* ========================= */
+/* =========================
+   DATABASE
+========================= */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-/* ========================= */
-/* 🧪 ROOT */
-/* ========================= */
-app.get("/", (req, res) => {
-  res.send("SXP Bridge API LIVE");
-});
+pool.connect()
+  .then(() => console.log("✅ DB connected"))
+  .catch(err => console.error("❌ DB error:", err));
 
-/* ========================= */
-/* ❤️ HEALTH */
-/* ========================= */
-app.get("/api/health", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT NOW()");
-    res.json({ status: "ok", db: "connected", time: result.rows[0] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* ========================= */
-/* 🔐 AUTH */
-/* ========================= */
-app.post("/api/auth/register", async (req, res) => {
-  const { email, password } = req.body;
-
-  const hashed = await bcrypt.hash(password, 10);
-
-  const ethWallet = ethers.Wallet.createRandom();
-  const bnbWallet = ethers.Wallet.createRandom();
-
-  const result = await pool.query(
-    `INSERT INTO users 
-    (email, password, eth_address, bnb_address, eth_private_key, bnb_private_key)
-    VALUES ($1,$2,$3,$4,$5,$6)
-    RETURNING id, email, eth_address, bnb_address`,
-    [
-      email,
-      hashed,
-      ethWallet.address,
-      bnbWallet.address,
-      ethWallet.privateKey,
-      bnbWallet.privateKey
-    ]
-  );
-
-  res.json(result.rows[0]);
-});
-
-app.post("/api/auth/login", async (req, res) => {
-  const { email, password } = req.body;
-
-  const result = await pool.query(
-    "SELECT * FROM users WHERE email=$1",
-    [email]
-  );
-
-  const user = result.rows[0];
-
-  if (!user) return res.status(401).json({ error: "User not found" });
-
-  const valid = await bcrypt.compare(password, user.password);
-  if (!valid) return res.status(401).json({ error: "Invalid password" });
-
-  const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: "2h" });
-
-  res.json({ success: true, token });
-});
-
-/* ========================= */
-/* 🔑 AUTH */
-/* ========================= */
-const verifyToken = (req, res, next) => {
-  const token = req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(403).json({ error: "No token" });
-
-  try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
-  } catch {
-    res.status(401).json({ error: "Invalid token" });
-  }
-};
-
-/* ========================= */
-/* 👤 USER */
-/* ========================= */
-app.get("/api/user/wallets", verifyToken, async (req, res) => {
-  const result = await pool.query(
-    "SELECT eth_address, bnb_address FROM users WHERE id=$1",
-    [req.user.id]
-  );
-  res.json(result.rows[0]);
-});
-
-app.get("/api/user/balance", verifyToken, async (req, res) => {
-  const result = await pool.query(
-    "SELECT balance FROM users WHERE id=$1",
-    [req.user.id]
-  );
-  res.json(result.rows[0]);
-});
-
-/* ========================= */
-/* 💰 REAL SXP DEPOSIT ENGINE */
-/* ========================= */
-
+/* =========================
+   BLOCKCHAIN
+========================= */
 const provider = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
-
-const SXP_ABI = [
-  "event Transfer(address indexed from, address indexed to, uint256 value)"
-];
 
 const sxpContract = new ethers.Contract(
   process.env.SXP_ETH_CONTRACT,
-  SXP_ABI,
+  [
+    "event Transfer(address indexed from, address indexed to, uint value)"
+  ],
   provider
 );
 
 let lastCheckedBlock = null;
 
-async function processTransfer(to, amount, txHash) {
-  const user = await pool.query(
-    `SELECT id FROM users WHERE LOWER(eth_address)=LOWER($1)`,
-    [to]
-  );
+/* =========================
+   AUTH MIDDLEWARE
+========================= */
+function auth(req, res, next) {
+  const token = req.headers.authorization?.split(" ")[1];
 
-  if (!user.rows.length) return;
+  if (!token) return res.status(401).json({ error: "No token" });
 
-  const exists = await pool.query(
-    "SELECT id FROM transactions WHERE tx_hash=$1",
-    [txHash]
-  );
-
-  if (exists.rows.length) return;
-
-  const value = Number(ethers.formatUnits(amount, 18));
-
-  await pool.query(
-    "UPDATE users SET balance = balance + $1 WHERE id=$2",
-    [value, user.rows[0].id]
-  );
-
-  await pool.query(
-    "INSERT INTO transactions (user_id, tx_hash, amount, network, type, status) VALUES ($1,$2,$3,'ETH','deposit','completed')",
-    [user.rows[0].id, txHash, value]
-  );
-
-  console.log(`💰 Deposit: ${value} SXP`);
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    res.status(401).json({ error: "Invalid token" });
+  }
 }
 
+/* =========================
+   HEALTH CHECK
+========================= */
+app.get("/api/health", async (req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({
+      status: "ok",
+      db: "connected",
+      time: new Date()
+    });
+  } catch {
+    res.status(500).json({ status: "error", db: "down" });
+  }
+});
+
+/* =========================
+   REGISTER
+========================= */
+app.post("/api/auth/register", async (req, res) => {
+  const { email, password } = req.body;
+
+  const hashed = await bcrypt.hash(password, 10);
+
+  const wallet = ethers.Wallet.createRandom();
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO users (email, password, eth_address, private_key)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, email, eth_address`,
+      [email, hashed, wallet.address, wallet.privateKey]
+    );
+
+    res.json(result.rows[0]);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Register failed" });
+  }
+});
+
+/* =========================
+   LOGIN
+========================= */
+app.post("/api/auth/login", async (req, res) => {
+  const { email, password } = req.body;
+
+  const user = await pool.query(
+    "SELECT * FROM users WHERE email=$1",
+    [email]
+  );
+
+  if (!user.rows.length) return res.status(401).json({ error: "Invalid" });
+
+  const valid = await bcrypt.compare(password, user.rows[0].password);
+
+  if (!valid) return res.status(401).json({ error: "Invalid" });
+
+  const token = jwt.sign(
+    { id: user.rows[0].id },
+    process.env.JWT_SECRET,
+    { expiresIn: "7d" }
+  );
+
+  res.json({ token });
+});
+
+/* =========================
+   GET WALLET
+========================= */
+app.get("/api/user/wallets", auth, async (req, res) => {
+  const user = await pool.query(
+    "SELECT eth_address FROM users WHERE id=$1",
+    [req.user.id]
+  );
+
+  res.json(user.rows[0]);
+});
+
+/* =========================
+   GET BALANCE
+========================= */
+app.get("/api/user/balance", auth, async (req, res) => {
+  const result = await pool.query(
+    "SELECT COALESCE(SUM(amount),0) as balance FROM transactions WHERE user_id=$1",
+    [req.user.id]
+  );
+
+  res.json({ balance: result.rows[0].balance });
+});
+
+/* =========================
+   PROCESS TRANSFER
+========================= */
+async function processTransfer(to, value, txHash) {
+  try {
+    const user = await pool.query(
+      "SELECT * FROM users WHERE eth_address=$1",
+      [to.toLowerCase()]
+    );
+
+    if (!user.rows.length) return;
+
+    const amount = Number(ethers.formatUnits(value, 18));
+
+    const exists = await pool.query(
+      "SELECT * FROM transactions WHERE tx_hash=$1",
+      [txHash]
+    );
+
+    if (exists.rows.length) return;
+
+    await pool.query(
+      `INSERT INTO transactions (user_id, amount, tx_hash)
+       VALUES ($1, $2, $3)`,
+      [user.rows[0].id, amount, txHash]
+    );
+
+    console.log(`💰 Deposit: ${amount} SXP → User ${user.rows[0].id}`);
+
+  } catch (err) {
+    console.error("Transfer error:", err.message);
+  }
+}
+
+/* =========================
+   SAFE POLLING ENGINE (FIXED)
+========================= */
 async function pollDeposits() {
   try {
     console.log("🔄 Checking SXP deposits...");
@@ -182,14 +196,21 @@ async function pollDeposits() {
     const latest = await provider.getBlockNumber();
 
     if (!lastCheckedBlock) {
-      lastCheckedBlock = latest - 20;
+      lastCheckedBlock = latest - 10;
     }
 
-    const logs = await provider.getLogs({
-      address: process.env.SXP_ETH_CONTRACT,
-      fromBlock: lastCheckedBlock,
-      toBlock: latest
-    });
+    const fromBlock = Math.max(lastCheckedBlock, latest - 10);
+
+    const logs = await Promise.race([
+      provider.getLogs({
+        address: process.env.SXP_ETH_CONTRACT,
+        fromBlock,
+        toBlock: latest
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("RPC timeout")), 5000)
+      )
+    ]);
 
     for (const log of logs) {
       try {
@@ -210,11 +231,16 @@ async function pollDeposits() {
   }
 }
 
-setInterval(pollDeposits, 120000);
+/* =========================
+   START POLLING
+========================= */
+setInterval(pollDeposits, 180000);
 
-/* ========================= */
-/* 🚀 START */
-/* ========================= */
-app.listen(PORT, "0.0.0.0", () => {
+/* =========================
+   START SERVER
+========================= */
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
