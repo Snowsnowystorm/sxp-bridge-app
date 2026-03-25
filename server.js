@@ -46,12 +46,19 @@ let lastCheckedBlock = null;
 app.get("/api/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
-    res.json({ status: "ok" });
-  } catch {
-    res.status(500).json({ status: "error" });
+    res.json({
+      status: "ok",
+      db: "connected",
+      time: new Date()
+    });
+  } catch (err) {
+    res.status(500).json({
+      status: "error",
+      db: "failed",
+      error: err.message
+    });
   }
 });
-
 /* =========================
    SAFE POLLING
 ========================= */
