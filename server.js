@@ -8,18 +8,26 @@ dotenv.config();
 const { Pool } = pkg;
 
 const app = express();
+
+/* ========================= */
+/* 🔧 CORE MIDDLEWARE */
+/* ========================= */
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+/* ✅ CRITICAL: PREVENT HANGING REQUESTS */
+app.use((req, res, next) => {
+  res.setTimeout(8000, () => {
+    console.log("⏰ Request timed out");
+    res.status(408).send("Request Timeout");
+  });
+  next();
+});
 
 /* ========================= */
-/* 🔍 STARTUP LOGGING */
+/* 🔐 ENV */
 /* ========================= */
-console.log("🚀 Booting SXP Bridge Backend...");
-console.log("ENV CHECK:");
-console.log("PORT:", PORT);
-console.log("DATABASE_URL exists:", !!process.env.DATABASE_URL);
+const PORT = process.env.PORT || 3000;
 
 /* ========================= */
 /* 🧠 DATABASE */
@@ -35,11 +43,18 @@ try {
   console.log("✅ DB pool created");
 
 } catch (err) {
-  console.error("❌ DB INIT ERROR:", err.message);
+  console.error("❌ DB ERROR:", err.message);
 }
 
 /* ========================= */
-/* ❤️ HEALTH */
+/* 🧪 ROOT ROUTE (IMPORTANT) */
+/* ========================= */
+app.get("/", (req, res) => {
+  res.status(200).send("SXP Bridge API LIVE");
+});
+
+/* ========================= */
+/* ❤️ HEALTH ROUTE */
 /* ========================= */
 app.get("/api/health", async (req, res) => {
   try {
@@ -50,6 +65,8 @@ app.get("/api/health", async (req, res) => {
       time: result.rows[0]
     });
   } catch (err) {
+    console.error("DB ERROR:", err.message);
+
     res.status(500).json({
       status: "error",
       db: "failed",
@@ -59,21 +76,14 @@ app.get("/api/health", async (req, res) => {
 });
 
 /* ========================= */
-/* 🧪 ROOT */
-/* ========================= */
-app.get("/", (req, res) => {
-  res.send("SXP Bridge API is running (SAFE MODE)");
-});
-
-/* ========================= */
 /* 🚀 START SERVER */
 /* ========================= */
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
 
 /* ========================= */
-/* ❗ GLOBAL ERROR HANDLER */
+/* ❗ GLOBAL ERROR HANDLERS */
 /* ========================= */
 process.on("uncaughtException", (err) => {
   console.error("🔥 UNCAUGHT EXCEPTION:", err);
