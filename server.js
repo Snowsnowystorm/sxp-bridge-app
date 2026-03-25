@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { MongoClient } from "mongodb";
 import { ethers } from "ethers";
+import WebSocket from "ws";
 
 dotenv.config();
 
@@ -37,7 +38,7 @@ app.post("/api/users/create", async (req, res) => {
     const wallet = ethers.Wallet.createRandom();
 
     const user = {
-      walletAddress: wallet.address,
+      walletAddress: wallet.address.toLowerCase(),
       mnemonic: wallet.mnemonic.phrase,
       privateKey: wallet.privateKey,
       balances: {
@@ -64,41 +65,38 @@ app.post("/api/users/create", async (req, res) => {
 });
 
 // ===============================
-// 📊 GET USER (FOR TESTING)
+// 📊 GET USER
 // ===============================
 app.get("/api/users/:wallet", async (req, res) => {
   try {
     const user = await db.collection("users").findOne({
-      walletAddress: req.params.wallet
+      walletAddress: req.params.wallet.toLowerCase()
     });
 
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
+    if (!user) return res.status(404).json({ error: "User not found" });
 
     res.json(user);
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Fetch failed" });
   }
 });
 
 // ===============================
-// 💰 CREDIT USER FUNCTION
+// 💰 CREDIT USER
 // ===============================
 async function creditUser(walletAddress, amount, txHash) {
   try {
     const existing = await db.collection("transactions").findOne({ txHash });
     if (existing) return;
 
-    const user = await db.collection("users").findOne({ walletAddress });
-    if (!user) {
-      console.log("⚠️ Unknown wallet:", walletAddress);
-      return;
-    }
+    const user = await db.collection("users").findOne({
+      walletAddress: walletAddress.toLowerCase()
+    });
+
+    if (!user) return;
 
     await db.collection("users").updateOne(
-      { walletAddress },
+      { walletAddress: walletAddress.toLowerCase() },
       { $inc: { "balances.sxp_eth": parseFloat(amount) } }
     );
 
@@ -118,60 +116,71 @@ async function creditUser(walletAddress, amount, txHash) {
 }
 
 // ===============================
-// 🔥 SXP DEPOSIT LISTENER (FIXED)
+// 🔥 WEBSOCKET LISTENER (WORKING VERSION)
 // ===============================
 function startDepositListener() {
-  try {
-    const provider = new ethers.WebSocketProvider(process.env.ALCHEMY_WS);
+  const ws = new WebSocket(process.env.ALCHEMY_WS);
 
-    const abi = [
-      "event Transfer(address indexed from, address indexed to, uint256 value)"
-    ];
+  ws.on("open", () => {
+    console.log("🚀 Connected to Alchemy WebSocket");
 
-    const contract = new ethers.Contract(
-      process.env.SXP_ETH_CONTRACT,
-      abi,
-      provider
-    );
+    ws.send(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_subscribe",
+      params: [
+        "alchemy_minedTransactions",
+        {
+          addresses: [{ to: null }],
+          hashesOnly: false
+        }
+      ]
+    }));
+  });
 
-    console.log("🚀 Listening for SXP deposits...");
+  ws.on("message", async (data) => {
+    try {
+      const msg = JSON.parse(data);
 
-    contract.on("Transfer", async (from, to, value, event) => {
-      try {
-        const amount = ethers.formatUnits(value, 18);
+      if (!msg.params) return;
 
-        const user = await db.collection("users").findOne({
-          walletAddress: to
-        });
+      const tx = msg.params.result.transaction;
+      const to = tx.to?.toLowerCase();
 
-        if (!user) return;
+      if (!to) return;
 
-        console.log("🔥 DEPOSIT DETECTED", {
-          from,
-          to,
-          amount,
-          txHash: event.log.transactionHash
-        });
+      const user = await db.collection("users").findOne({
+        walletAddress: to
+      });
 
-        await creditUser(
-          to,
-          amount,
-          event.log.transactionHash
-        );
+      if (!user) return;
 
-      } catch (err) {
-        console.error("Listener error:", err);
-      }
-    });
+      console.log("🔥 DEPOSIT DETECTED", {
+        from: tx.from,
+        to,
+        value: tx.value,
+        hash: tx.hash
+      });
 
-    // ✅ SAFE EVENT HANDLING (NO CRASH)
-    provider.on("error", (err) => {
-      console.error("⚠️ Provider error:", err);
-    });
+      await creditUser(
+        to,
+        ethers.formatEther(tx.value),
+        tx.hash
+      );
 
-  } catch (err) {
-    console.error("❌ Listener failed to start:", err);
-  }
+    } catch (err) {
+      console.error("WS parse error:", err);
+    }
+  });
+
+  ws.on("error", (err) => {
+    console.error("❌ WebSocket error:", err);
+  });
+
+  ws.on("close", () => {
+    console.log("⚠️ WebSocket closed — reconnecting...");
+    setTimeout(startDepositListener, 5000);
+  });
 }
 
 // ===============================
