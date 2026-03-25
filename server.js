@@ -135,11 +135,7 @@ function startDepositListener() {
     }
   });
 
-  // 🔁 AUTO RECONNECT
-  provider._websocket.on("close", () => {
-    console.log("⚠️ WebSocket closed. Restarting...");
-    process.exit(1);
-  });
+
 }
 
 // ===============================
