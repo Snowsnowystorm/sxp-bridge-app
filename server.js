@@ -135,6 +135,13 @@ function startDepositListener() {
     }
   });
 
+  provider.on("error", (err) => {
+  console.error("WebSocket error:", err);
+});
+
+provider.on("close", () => {
+  console.log("⚠️ WebSocket closed");
+});
 
 }
 
