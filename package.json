@@ -1,18 +1,10 @@
 {
   "name": "sxp-bridge-backend",
   "version": "1.0.0",
-  "description": "SXP Bridge Production Backend",
-  "type": "module",
   "main": "server.js",
-
-  "engines": {
-    "node": "18.x"
-  },
-
   "scripts": {
     "start": "node server.js"
   },
-
   "dependencies": {
     "bcrypt": "^5.1.0",
     "cors": "^2.8.5",
