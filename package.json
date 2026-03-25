@@ -1,6 +1,7 @@
 {
   "name": "sxp-bridge-backend",
   "version": "1.0.0",
+  "description": "SXP Bridge Backend",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -12,6 +13,7 @@
     "dotenv": "^16.4.5",
     "ethers": "^6.16.0",
     "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
     "pg": "^8.11.5"
   }
 }
