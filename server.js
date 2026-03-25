@@ -23,12 +23,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-pool.connect()
-  .then(() => console.log("✅ DB connected"))
-  .catch(err => {
-    console.error("❌ DB error:", err);
-    process.exit(1);
-  });
+console.log("✅ DB pool ready");
 
 /* =========================
    BLOCKCHAIN
