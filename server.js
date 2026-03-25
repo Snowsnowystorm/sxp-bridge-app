@@ -1,3 +1,4 @@
+console.log("🔥 DATABASE_URL VALUE:", process.env.DATABASE_URL);
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
