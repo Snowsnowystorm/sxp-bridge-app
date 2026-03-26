@@ -76,12 +76,14 @@ async function creditUser(walletAddress, amount, txHash) {
 }
 
 // ===============================
-// 🔥 SXP LISTENER (HTTP POLLING)
+// 🔥 SXP LISTENER (ANKR STABLE)
 // ===============================
 function startListener() {
-  console.log("🔌 Using HTTP polling (stable mode)...");
+  console.log("🔌 Using ANKR RPC (stable mode)...");
 
-  const provider = new ethers.JsonRpcProvider(process.env.ALCHEMY_HTTP);
+  const provider = new ethers.JsonRpcProvider(
+    process.env.ALCHEMY_HTTP // now using ANKR URL
+  );
 
   const abi = [
     "event Transfer(address indexed from, address indexed to, uint256 value)"
@@ -100,7 +102,7 @@ function startListener() {
       const currentBlock = await provider.getBlockNumber();
 
       if (lastBlock === 0) {
-        lastBlock = currentBlock - 1;
+        lastBlock = currentBlock - 2;
         return;
       }
 
@@ -141,7 +143,7 @@ function startListener() {
     } catch (err) {
       console.error("❌ Polling error:", err.message);
     }
-  }, 10000); // every 10 seconds
+  }, 20000); // 🔥 20 seconds (safe)
 }
 
 // ===============================
