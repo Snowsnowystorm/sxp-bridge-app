@@ -76,35 +76,53 @@ async function creditUser(walletAddress, amount, txHash) {
 }
 
 // ===============================
-// 🔥 SXP LISTENER (ETHERS v6 SAFE)
+// 🔥 SXP LISTENER (HTTP POLLING)
 // ===============================
 function startListener() {
-  try {
-    console.log("🔌 Connecting to Alchemy...");
+  console.log("🔌 Using HTTP polling (stable mode)...");
 
-    const provider = new ethers.WebSocketProvider(process.env.ALCHEMY_WS);
+  const provider = new ethers.JsonRpcProvider(process.env.ALCHEMY_HTTP);
 
-    const abi = [
-      "event Transfer(address indexed from, address indexed to, uint256 value)"
-    ];
+  const abi = [
+    "event Transfer(address indexed from, address indexed to, uint256 value)"
+  ];
 
-    const contract = new ethers.Contract(
-      process.env.SXP_ETH_CONTRACT,
-      abi,
-      provider
-    );
+  const contract = new ethers.Contract(
+    process.env.SXP_ETH_CONTRACT,
+    abi,
+    provider
+  );
 
-    console.log("🚀 Listening for SXP token deposits...");
+  let lastBlock = 0;
 
-    contract.on("Transfer", async (from, to, value, event) => {
-      try {
+  setInterval(async () => {
+    try {
+      const currentBlock = await provider.getBlockNumber();
+
+      if (lastBlock === 0) {
+        lastBlock = currentBlock - 1;
+        return;
+      }
+
+      console.log(`🔎 Scanning blocks: ${lastBlock} → ${currentBlock}`);
+
+      const events = await contract.queryFilter(
+        "Transfer",
+        lastBlock,
+        currentBlock
+      );
+
+      for (const event of events) {
+        const { from, to, value } = event.args;
+        const txHash = event.transactionHash;
+
         const toAddress = to.toLowerCase();
 
         const user = await db.collection("users").findOne({
           walletAddress: toAddress
         });
 
-        if (!user) return;
+        if (!user) continue;
 
         const amount = ethers.formatUnits(value, 18);
 
@@ -112,20 +130,18 @@ function startListener() {
           from,
           to,
           amount,
-          tx: event.log.transactionHash
+          txHash
         });
 
-        await creditUser(toAddress, amount, event.log.transactionHash);
-
-      } catch (err) {
-        console.error("Listener error:", err);
+        await creditUser(toAddress, amount, txHash);
       }
-    });
 
-  } catch (err) {
-    console.error("❌ Listener crashed, retrying in 5s...", err);
-    setTimeout(startListener, 5000);
-  }
+      lastBlock = currentBlock;
+
+    } catch (err) {
+      console.error("❌ Polling error:", err.message);
+    }
+  }, 10000); // every 10 seconds
 }
 
 // ===============================
