@@ -3,6 +3,10 @@ import dotenv from "dotenv";
 import mongoose from "mongoose";
 import { ethers } from "ethers";
 
+// Solar SDK
+import pkg from "@solar-network/crypto";
+const { Identities, Transactions, Managers } = pkg;
+
 dotenv.config();
 
 const app = express();
@@ -18,7 +22,7 @@ console.log("🔑 LENGTH:", process.env.PRIVATE_KEY?.length);
 
 const PRIVATE_KEY = (process.env.PRIVATE_KEY || "").trim();
 
-/* ================= PROVIDERS ================= */
+/* ================= ETH PROVIDERS ================= */
 const providerPrimary = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
 const providerFallback = new ethers.JsonRpcProvider(process.env.ETH_FALLBACK_RPC);
 
@@ -29,32 +33,49 @@ function switchProvider() {
   provider = provider === providerPrimary ? providerFallback : providerPrimary;
 }
 
-/* ================= SAFE WALLET INIT ================= */
-let wallet;
+/* ================= ETH WALLET ================= */
+let wallet = null;
+let contract = null;
 
 try {
-  if (!PRIVATE_KEY.startsWith("0x") || PRIVATE_KEY.length !== 66) {
-    console.log("❌ INVALID PRIVATE KEY FORMAT — SERVER WILL STILL RUN (NO WITHDRAW)");
-  } else {
+  if (PRIVATE_KEY.startsWith("0x") && PRIVATE_KEY.length === 66) {
     wallet = new ethers.Wallet(PRIVATE_KEY, provider);
     console.log("🔥 Hot Wallet:", wallet.address);
+
+    contract = new ethers.Contract(
+      process.env.SXP_CONTRACT,
+      [
+        "event Transfer(address indexed from, address indexed to, uint amount)",
+        "function transfer(address to, uint amount) returns (bool)"
+      ],
+      wallet
+    );
+  } else {
+    console.log("❌ INVALID PRIVATE KEY FORMAT — withdraw disabled");
   }
 } catch (err) {
   console.log("❌ Wallet init failed:", err.message);
 }
 
-/* ================= CONTRACT ================= */
-let contract;
+/* ================= SOLAR SETUP ================= */
+let solarKeys = null;
+let solarAddress = null;
 
-if (wallet) {
-  contract = new ethers.Contract(
-    process.env.SXP_CONTRACT,
-    [
-      "event Transfer(address indexed from, address indexed to, uint amount)",
-      "function transfer(address to, uint amount) returns (bool)"
-    ],
-    wallet
-  );
+try {
+  if (process.env.SOLAR_PASSPHRASE) {
+    Managers.configManager.setFromPreset("mainnet");
+
+    const passphrase = process.env.SOLAR_PASSPHRASE.trim();
+
+    solarKeys = Identities.Keys.fromPassphrase(passphrase);
+    solarAddress = Identities.Address.fromPublicKey(solarKeys.publicKey);
+
+    console.log("🌞 Solar Wallet:", solarAddress);
+  } else {
+    console.log("⚠️ No Solar passphrase set");
+  }
+} catch (err) {
+  console.log("❌ Solar init error:", err.message);
 }
 
 /* ================= MODELS ================= */
@@ -84,10 +105,12 @@ let lastBlock = 0;
 
 async function scanDeposits() {
   try {
+    if (!contract) return;
+
     const currentBlock = await provider.getBlockNumber();
 
     if (!lastBlock) {
-      lastBlock = currentBlock - 50;
+      lastBlock = currentBlock - 20;
       console.log("⚡ Starting scanner from:", lastBlock);
     }
 
@@ -125,7 +148,7 @@ async function scanDeposits() {
             chain: "ETH"
           });
 
-          console.log("💰 Deposit detected:", amount);
+          console.log("💰 Deposit:", amount);
         }
       }
     }
@@ -135,6 +158,27 @@ async function scanDeposits() {
   } catch (err) {
     console.log("❌ Scanner error:", err.message);
     switchProvider();
+  }
+}
+
+/* ================= SOLAR SEND ================= */
+async function sendSolar(toAddress, amount) {
+  try {
+    if (!solarKeys) throw new Error("Solar not configured");
+
+    const tx = Transactions.BuilderFactory.transfer()
+      .recipientId(toAddress)
+      .amount(Math.floor(amount * 1e8))
+      .sign(process.env.SOLAR_PASSPHRASE.trim())
+      .getStruct();
+
+    console.log("🌞 Solar TX created");
+
+    return tx;
+
+  } catch (err) {
+    console.log("❌ Solar send error:", err.message);
+    throw err;
   }
 }
 
@@ -198,20 +242,23 @@ app.post("/bridge/solar", async (req, res) => {
 
     user.balances.sxp_eth -= amount;
     user.balances.sxp_solar += amount;
-
     await user.save();
+
+    const tx = await sendSolar(solarAddress, amount);
 
     await Tx.create({
       walletAddress,
       amount,
-      txHash: "PENDING_SOLAR_" + Date.now(),
+      txHash: tx.id || "SOLAR_PENDING",
       type: "bridge",
       chain: "SOLAR"
     });
 
-    console.log("🌉 Bridge queued:", amount);
-
-    res.json({ success: true });
+    res.json({
+      success: true,
+      message: "Solar TX created",
+      tx
+    });
 
   } catch (err) {
     console.log("❌ Bridge error:", err.message);
