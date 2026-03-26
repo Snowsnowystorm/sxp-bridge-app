@@ -99,7 +99,7 @@ function createProvider() {
 }
 
 // ===============================
-// 🔥 ERC20 LISTENER (SXP ONLY)
+// 🔥 ERC20 LISTENER (SXP FINAL)
 // ===============================
 function startListener() {
   console.log("🔌 Starting ERC20 scanner (SXP mode)...");
@@ -109,15 +109,17 @@ function startListener() {
 
   let lastBlock = 0;
 
-  const SXP_CONTRACT = "0x8ce9137d39326ad0cd22f6e7b27f55f6c7c72b45";
+  // ✅ CORRECT SXP CONTRACT
+  const SXP_CONTRACT = "0x8ce9137d39326ad0cd6491fb5cc0cba0e089b6a9";
 
   setInterval(async () => {
     try {
       const currentBlock = await provider.getBlockNumber();
 
+      // 🔥 BACKFILL TO CATCH YOUR OLD DEPOSIT
       if (lastBlock === 0) {
-        lastBlock = currentBlock - 200;
-        console.log("⚡ Initializing scanner from block:", lastBlock);
+        lastBlock = currentBlock - 5000;
+        console.log("⚡ Backfilling from block:", lastBlock);
       }
 
       console.log(`🔎 Scanning blocks: ${lastBlock} → ${currentBlock}`);
@@ -145,7 +147,7 @@ function startListener() {
 
           for (const log of logs) {
             try {
-              // ✅ Correct ERC20 parsing
+              // ✅ CORRECT ERC20 PARSING
               const fromAddr = "0x" + log.topics[1].slice(26);
               const toAddr = "0x" + log.topics[2].slice(26);
 
@@ -208,7 +210,7 @@ function startListener() {
 }
 
 // ===============================
-// 💓 KEEP ALIVE (RAILWAY SAFE)
+// 💓 KEEP ALIVE
 // ===============================
 setInterval(() => {
   console.log("💓 Heartbeat alive...");
