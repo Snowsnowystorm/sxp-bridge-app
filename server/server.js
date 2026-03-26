@@ -12,6 +12,15 @@ app.use(express.json());
 mongoose.connect(process.env.DATABASE_URL);
 console.log("✅ DB connected");
 
+/* ================= ENV VALIDATION ================= */
+if (!process.env.PRIVATE_KEY || !process.env.PRIVATE_KEY.startsWith("0x") || process.env.PRIVATE_KEY.length !== 66) {
+  throw new Error("❌ INVALID PRIVATE KEY IN .env (must be 0x + 64 hex chars)");
+}
+
+if (!process.env.SXP_CONTRACT) {
+  throw new Error("❌ Missing SXP_CONTRACT in .env");
+}
+
 /* ================= MODELS ================= */
 const userSchema = new mongoose.Schema({
   walletAddress: String,
@@ -67,11 +76,11 @@ async function scanDeposits() {
     const currentBlock = await provider.getBlockNumber();
 
     if (!lastBlock) {
-      lastBlock = currentBlock - 100;
+      lastBlock = currentBlock - 50;
       console.log("⚡ Starting scanner from:", lastBlock);
     }
 
-    const step = 20;
+    const step = 15;
 
     for (let i = lastBlock; i < currentBlock; i += step) {
       const toBlock = Math.min(i + step, currentBlock);
@@ -105,7 +114,7 @@ async function scanDeposits() {
             chain: "ETH"
           });
 
-          console.log("💰 Deposit:", amount);
+          console.log("💰 Deposit detected:", amount);
         }
       }
     }
@@ -134,11 +143,11 @@ app.post("/withdraw", async (req, res) => {
       return res.status(400).json({ error: "Insufficient balance" });
     }
 
-    // 🔒 Deduct first (prevents double spend)
+    // 🔒 deduct first
     user.balances.sxp_eth -= amount;
     await user.save();
 
-    console.log("🚀 Withdraw →", toAddress);
+    console.log("🚀 Sending withdraw →", toAddress);
 
     const tx = await contract.transfer(
       toAddress,
@@ -155,10 +164,7 @@ app.post("/withdraw", async (req, res) => {
       chain: "ETH"
     });
 
-    res.json({
-      success: true,
-      txHash: tx.hash
-    });
+    res.json({ success: true, txHash: tx.hash });
 
   } catch (err) {
     console.log("❌ Withdraw error:", err.message);
@@ -166,7 +172,7 @@ app.post("/withdraw", async (req, res) => {
   }
 });
 
-/* ================= BRIDGE (QUEUE SYSTEM) ================= */
+/* ================= BRIDGE ================= */
 app.post("/bridge/solar", async (req, res) => {
   try {
     const { walletAddress, solarAddress, amount } = req.body;
@@ -182,10 +188,7 @@ app.post("/bridge/solar", async (req, res) => {
       return res.status(400).json({ error: "Insufficient balance" });
     }
 
-    // 🔒 Deduct ETH
     user.balances.sxp_eth -= amount;
-
-    // 💎 Credit Solar (internal balance)
     user.balances.sxp_solar += amount;
 
     await user.save();
@@ -202,7 +205,7 @@ app.post("/bridge/solar", async (req, res) => {
 
     res.json({
       success: true,
-      message: "Bridge queued (Solar payout pending)"
+      message: "Bridge queued (awaiting Solar payout)"
     });
 
   } catch (err) {
