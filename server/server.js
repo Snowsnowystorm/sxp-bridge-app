@@ -54,7 +54,7 @@ app.post("/api/users/create", async (req, res) => {
 // ===============================
 // 💰 CREDIT USER
 // ===============================
-async function creditUser(walletAddress, amount, txHash) {
+async function creditUser(walletAddress, amount, txHash, tokenAddress) {
   const exists = await db.collection("transactions").findOne({ txHash });
   if (exists) return;
 
@@ -67,8 +67,8 @@ async function creditUser(walletAddress, amount, txHash) {
     walletAddress,
     amount,
     txHash,
+    tokenAddress,
     type: "deposit",
-    token: "SXP",
     createdAt: new Date()
   });
 
@@ -76,23 +76,17 @@ async function creditUser(walletAddress, amount, txHash) {
 }
 
 // ===============================
-// 🔥 SXP LISTENER (ANKR STABLE)
+// 🔥 GLOBAL ERC20 LISTENER
 // ===============================
 function startListener() {
-  console.log("🔌 Using ANKR RPC (stable mode)...");
+  console.log("🔌 Using GLOBAL ERC20 scanner...");
 
   const provider = new ethers.JsonRpcProvider(
-    process.env.ALCHEMY_HTTP // now using ANKR URL
-  );
-
-  const abi = [
-    "event Transfer(address indexed from, address indexed to, uint256 value)"
-  ];
-
-  const contract = new ethers.Contract(
-    process.env.SXP_ETH_CONTRACT,
-    abi,
-    provider
+    process.env.RPC_URL,
+    {
+      name: "mainnet",
+      chainId: 1
+    }
   );
 
   let lastBlock = 0;
@@ -102,40 +96,59 @@ function startListener() {
       const currentBlock = await provider.getBlockNumber();
 
       if (lastBlock === 0) {
-        lastBlock = currentBlock - 2;
+        lastBlock = currentBlock - 2000; // 🔥 scan past blocks
         return;
       }
 
       console.log(`🔎 Scanning blocks: ${lastBlock} → ${currentBlock}`);
 
-      const events = await contract.queryFilter(
-        "Transfer",
-        lastBlock,
-        currentBlock
-      );
+      const logs = await provider.getLogs({
+        fromBlock: lastBlock,
+        toBlock: currentBlock,
+        topics: [
+          ethers.id("Transfer(address,address,uint256)")
+        ]
+      });
 
-      for (const event of events) {
-        const { from, to, value } = event.args;
-        const txHash = event.transactionHash;
+      for (const log of logs) {
+        try {
+          const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+            ["address", "address", "uint256"],
+            log.data
+          );
 
-        const toAddress = to.toLowerCase();
+          const from = decoded[0];
+          const to = decoded[1];
+          const value = decoded[2];
 
-        const user = await db.collection("users").findOne({
-          walletAddress: toAddress
-        });
+          const toAddress = to.toLowerCase();
 
-        if (!user) continue;
+          const user = await db.collection("users").findOne({
+            walletAddress: toAddress
+          });
 
-        const amount = ethers.formatUnits(value, 18);
+          if (!user) continue;
 
-        console.log("🔥 SXP DEPOSIT DETECTED:", {
-          from,
-          to,
-          amount,
-          txHash
-        });
+          const amount = ethers.formatUnits(value, 18);
 
-        await creditUser(toAddress, amount, txHash);
+          console.log("🔥 TOKEN DEPOSIT DETECTED:", {
+            token: log.address,
+            from,
+            to,
+            amount,
+            txHash: log.transactionHash
+          });
+
+          await creditUser(
+            toAddress,
+            amount,
+            log.transactionHash,
+            log.address
+          );
+
+        } catch (err) {
+          continue;
+        }
       }
 
       lastBlock = currentBlock;
@@ -143,7 +156,7 @@ function startListener() {
     } catch (err) {
       console.error("❌ Polling error:", err.message);
     }
-  }, 20000); // 🔥 20 seconds (safe)
+  }, 20000);
 }
 
 // ===============================
