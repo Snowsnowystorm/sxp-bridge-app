@@ -7,10 +7,10 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "@solar-network/crypto": "^7.3.0",
     "dotenv": "^16.4.5",
     "ethers": "^6.16.0",
     "express": "^4.19.2",
-    "mongoose": "^8.5.0"
+    "mongoose": "^8.5.0",
+    "axios": "^1.6.8"
   }
 }
