@@ -2,10 +2,7 @@ import express from "express";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import { ethers } from "ethers";
-
-// Solar SDK
-import pkg from "@solar-network/crypto";
-const { Identities, Transactions, Managers } = pkg;
+import axios from "axios";
 
 dotenv.config();
 
@@ -16,7 +13,7 @@ app.use(express.json());
 mongoose.connect(process.env.DATABASE_URL);
 console.log("✅ DB connected");
 
-/* ================= DEBUG ENV ================= */
+/* ================= ENV DEBUG ================= */
 console.log("🔑 RAW PRIVATE KEY:", process.env.PRIVATE_KEY);
 console.log("🔑 LENGTH:", process.env.PRIVATE_KEY?.length);
 
@@ -55,27 +52,6 @@ try {
   }
 } catch (err) {
   console.log("❌ Wallet init failed:", err.message);
-}
-
-/* ================= SOLAR SETUP ================= */
-let solarKeys = null;
-let solarAddress = null;
-
-try {
-  if (process.env.SOLAR_PASSPHRASE) {
-    Managers.configManager.setFromPreset("mainnet");
-
-    const passphrase = process.env.SOLAR_PASSPHRASE.trim();
-
-    solarKeys = Identities.Keys.fromPassphrase(passphrase);
-    solarAddress = Identities.Address.fromPublicKey(solarKeys.publicKey);
-
-    console.log("🌞 Solar Wallet:", solarAddress);
-  } else {
-    console.log("⚠️ No Solar passphrase set");
-  }
-} catch (err) {
-  console.log("❌ Solar init error:", err.message);
 }
 
 /* ================= MODELS ================= */
@@ -161,20 +137,17 @@ async function scanDeposits() {
   }
 }
 
-/* ================= SOLAR SEND ================= */
+/* ================= SOLAR (API MODE - SAFE PLACEHOLDER) ================= */
 async function sendSolar(toAddress, amount) {
   try {
-    if (!solarKeys) throw new Error("Solar not configured");
+    console.log("🌞 Solar bridge placeholder triggered");
 
-    const tx = Transactions.BuilderFactory.transfer()
-      .recipientId(toAddress)
-      .amount(Math.floor(amount * 1e8))
-      .sign(process.env.SOLAR_PASSPHRASE.trim())
-      .getStruct();
-
-    console.log("🌞 Solar TX created");
-
-    return tx;
+    // ⚠️ Real signing + broadcast comes next phase
+    return {
+      id: "SOLAR_PENDING",
+      to: toAddress,
+      amount
+    };
 
   } catch (err) {
     console.log("❌ Solar send error:", err.message);
@@ -182,7 +155,7 @@ async function sendSolar(toAddress, amount) {
   }
 }
 
-/* ================= WITHDRAW ================= */
+/* ================= WITHDRAW (ETH) ================= */
 app.post("/withdraw", async (req, res) => {
   try {
     if (!wallet) {
@@ -228,7 +201,7 @@ app.post("/withdraw", async (req, res) => {
   }
 });
 
-/* ================= BRIDGE ================= */
+/* ================= BRIDGE TO SOLAR ================= */
 app.post("/bridge/solar", async (req, res) => {
   try {
     const { walletAddress, solarAddress, amount } = req.body;
@@ -249,14 +222,14 @@ app.post("/bridge/solar", async (req, res) => {
     await Tx.create({
       walletAddress,
       amount,
-      txHash: tx.id || "SOLAR_PENDING",
+      txHash: tx.id,
       type: "bridge",
       chain: "SOLAR"
     });
 
     res.json({
       success: true,
-      message: "Solar TX created",
+      message: "Solar bridge initiated (pending real transfer)",
       tx
     });
 
