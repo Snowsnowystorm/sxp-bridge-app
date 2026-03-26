@@ -1,333 +1,226 @@
 import express from "express";
-import cors from "cors";
 import dotenv from "dotenv";
-import { MongoClient } from "mongodb";
+import mongoose from "mongoose";
 import { ethers } from "ethers";
-import jwt from "jsonwebtoken";
-import bcrypt from "bcrypt";
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
-app.use(cors());
 
-// ===============================
-// CONFIG
-// ===============================
-const PORT = process.env.PORT || 8000;
-const JWT_SECRET = process.env.JWT_SECRET;
+/* ================= DATABASE ================= */
+mongoose.connect(process.env.DATABASE_URL);
+console.log("✅ DB connected");
 
-const SXP_CONTRACT = "0x8ce9137d39326ad0cd6491fb5cc0cba0e089b6a9";
+/* ================= MODELS ================= */
+const userSchema = new mongoose.Schema({
+  walletAddress: String,
+  balances: {
+    sxp_eth: { type: Number, default: 0 },
+    sxp_solar: { type: Number, default: 0 }
+  }
+});
 
-const ERC20_ABI = [
-  "function transfer(address to, uint amount) returns (bool)"
-];
+const User = mongoose.model("User", userSchema);
 
-// ===============================
-// RPC FAILOVER
-// ===============================
-const RPCS = [
-  "https://rpc.flashbots.net",
-  "https://ethereum.publicnode.com",
-  "https://cloudflare-eth.com"
-];
+const txSchema = new mongoose.Schema({
+  walletAddress: String,
+  amount: String,
+  txHash: String,
+  type: String,
+  chain: String,
+  createdAt: { type: Date, default: Date.now }
+});
 
-let rpcIndex = 0;
+const Tx = mongoose.model("Tx", txSchema);
 
-function getProvider() {
-  return new ethers.JsonRpcProvider(RPCS[rpcIndex]);
+/* ================= PROVIDERS ================= */
+const providerPrimary = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
+const providerFallback = new ethers.JsonRpcProvider(process.env.ETH_FALLBACK_RPC);
+
+let provider = providerPrimary;
+
+function switchProvider() {
+  console.log("🔄 Switching RPC...");
+  provider = provider === providerPrimary ? providerFallback : providerPrimary;
 }
 
-function switchRPC() {
-  rpcIndex = (rpcIndex + 1) % RPCS.length;
-  console.log("🔄 Switching RPC →", RPCS[rpcIndex]);
-}
+/* ================= HOT WALLET ================= */
+const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
 
-let provider = getProvider();
+console.log("🔥 Hot Wallet:", wallet.address);
 
-// ===============================
-// DB
-// ===============================
-const client = new MongoClient(process.env.DATABASE_URL);
-let db;
+/* ================= CONTRACT ================= */
+const contract = new ethers.Contract(
+  process.env.SXP_CONTRACT,
+  [
+    "event Transfer(address indexed from, address indexed to, uint amount)",
+    "function transfer(address to, uint amount) returns (bool)"
+  ],
+  wallet
+);
 
-async function connectDB() {
-  await client.connect();
-  db = client.db("sxp_bridge");
-  console.log("✅ DB connected");
-}
+/* ================= SCANNER ================= */
+let lastBlock = 0;
 
-// ===============================
-// AUTH
-// ===============================
-function auth(req, res, next) {
-  const token = req.headers.authorization;
-
-  if (!token) return res.status(401).json({ error: "No token" });
-
+async function scanDeposits() {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
-    next();
-  } catch {
-    return res.status(403).json({ error: "Invalid token" });
+    const currentBlock = await provider.getBlockNumber();
+
+    if (!lastBlock) {
+      lastBlock = currentBlock - 100;
+      console.log("⚡ Starting scanner from:", lastBlock);
+    }
+
+    const step = 20;
+
+    for (let i = lastBlock; i < currentBlock; i += step) {
+      const toBlock = Math.min(i + step, currentBlock);
+
+      console.log(`📦 Chunk: ${i} → ${toBlock}`);
+
+      const logs = await provider.getLogs({
+        address: process.env.SXP_CONTRACT,
+        fromBlock: i,
+        toBlock: toBlock,
+        topics: [ethers.id("Transfer(address,address,uint256)")]
+      });
+
+      for (const log of logs) {
+        const parsed = contract.interface.parseLog(log);
+
+        const to = parsed.args.to.toLowerCase();
+        const amount = Number(ethers.formatUnits(parsed.args.amount, 18));
+
+        const user = await User.findOne({ walletAddress: to });
+
+        if (user) {
+          user.balances.sxp_eth += amount;
+          await user.save();
+
+          await Tx.create({
+            walletAddress: to,
+            amount,
+            txHash: log.transactionHash,
+            type: "deposit",
+            chain: "ETH"
+          });
+
+          console.log("💰 Deposit:", amount);
+        }
+      }
+    }
+
+    lastBlock = currentBlock;
+
+  } catch (err) {
+    console.log("❌ Scanner error:", err.message);
+    switchProvider();
   }
 }
 
-// ===============================
-// RATE LIMIT
-// ===============================
-const withdrawCooldown = new Map();
-
-function checkRateLimit(wallet) {
-  const now = Date.now();
-  const last = withdrawCooldown.get(wallet);
-
-  if (last && now - last < 30000) return false;
-
-  withdrawCooldown.set(wallet, now);
-  return true;
-}
-
-// ===============================
-// REGISTER
-// ===============================
-app.post("/api/register", async (req, res) => {
-  const { password } = req.body;
-
-  const hash = await bcrypt.hash(password, 10);
-  const wallet = ethers.Wallet.createRandom();
-
-  const user = {
-    walletAddress: wallet.address.toLowerCase(),
-    privateKey: wallet.privateKey,
-    password: hash,
-    balances: {
-      sxp_eth: 0
-    },
-    createdAt: new Date()
-  };
-
-  await db.collection("users").insertOne(user);
-
-  res.json({
-    walletAddress: user.walletAddress
-  });
-});
-
-// ===============================
-// LOGIN
-// ===============================
-app.post("/api/login", async (req, res) => {
-  const { walletAddress, password } = req.body;
-
-  const user = await db.collection("users").findOne({
-    walletAddress: walletAddress.toLowerCase()
-  });
-
-  if (!user) return res.status(404).json({ error: "User not found" });
-
-  const valid = await bcrypt.compare(password, user.password);
-
-  if (!valid) return res.status(403).json({ error: "Wrong password" });
-
-  const token = jwt.sign(
-    { walletAddress: user.walletAddress },
-    JWT_SECRET,
-    { expiresIn: "7d" }
-  );
-
-  res.json({ token });
-});
-
-// ===============================
-// CREDIT USER (DEPOSIT)
-// ===============================
-async function creditUser(walletAddress, amount, txHash) {
-  const exists = await db.collection("transactions").findOne({ txHash });
-  if (exists) return;
-
-  await db.collection("users").updateOne(
-    { walletAddress },
-    { $inc: { "balances.sxp_eth": parseFloat(amount) } }
-  );
-
-  await db.collection("transactions").insertOne({
-    walletAddress,
-    amount,
-    txHash,
-    type: "deposit",
-    createdAt: new Date()
-  });
-
-  console.log("💰 CREDITED:", walletAddress, amount);
-}
-
-// ===============================
-// ERC20 SCANNER
-// ===============================
-function startScanner() {
-  console.log("🔌 Starting ERC20 scanner...");
-
-  let lastBlock = 0;
-
-  setInterval(async () => {
-    try {
-      const currentBlock = await provider.getBlockNumber();
-
-      if (lastBlock === 0) {
-        lastBlock = currentBlock - 200;
-      }
-
-      console.log(`🔎 Scanning: ${lastBlock} → ${currentBlock}`);
-
-      const STEP = 20;
-      let from = lastBlock;
-
-      while (from < currentBlock) {
-        const to = Math.min(from + STEP, currentBlock);
-
-        try {
-          const logs = await provider.getLogs({
-            address: SXP_CONTRACT,
-            fromBlock: from,
-            toBlock: to,
-            topics: [
-              ethers.id("Transfer(address,address,uint256)")
-            ]
-          });
-
-          for (const log of logs) {
-            const toAddr = "0x" + log.topics[2].slice(26);
-            const toAddress = toAddr.toLowerCase();
-
-            const user = await db.collection("users").findOne({
-              walletAddress: toAddress
-            });
-
-            if (!user) continue;
-
-            const amount = ethers.formatUnits(log.data, 18);
-
-            console.log("🔥 DEPOSIT:", amount);
-
-            await creditUser(
-              toAddress,
-              amount,
-              log.transactionHash
-            );
-          }
-
-        } catch (err) {
-          console.log("⚠️ RPC fail → switching");
-          switchRPC();
-          provider = getProvider();
-          break;
-        }
-
-        from = to + 1;
-      }
-
-      lastBlock = currentBlock;
-
-    } catch (err) {
-      console.log("❌ Poll error → switching RPC");
-      switchRPC();
-      provider = getProvider();
-    }
-  }, 15000);
-}
-
-// ===============================
-// WITHDRAW (SECURE)
-// ===============================
-app.post("/api/withdraw", auth, async (req, res) => {
+/* ================= WITHDRAW ================= */
+app.post("/withdraw", async (req, res) => {
   try {
-    const { toAddress, amount } = req.body;
-    const walletAddress = req.user.walletAddress;
+    const { walletAddress, toAddress, amount } = req.body;
 
-    if (!checkRateLimit(walletAddress)) {
-      return res.status(429).json({ error: "Too many requests" });
+    if (!ethers.isAddress(toAddress)) {
+      return res.status(400).json({ error: "Invalid address" });
     }
 
-    const user = await db.collection("users").findOne({ walletAddress });
-
+    const user = await User.findOne({ walletAddress });
     if (!user) return res.status(404).json({ error: "User not found" });
 
     if (user.balances.sxp_eth < amount) {
       return res.status(400).json({ error: "Insufficient balance" });
     }
 
-    if (!ethers.isAddress(toAddress)) {
-      return res.status(400).json({ error: "Invalid address" });
-    }
+    // 🔒 Deduct first
+    user.balances.sxp_eth -= amount;
+    await user.save();
 
-    const wallet = new ethers.Wallet(user.privateKey, provider);
-
-    const contract = new ethers.Contract(
-      SXP_CONTRACT,
-      ERC20_ABI,
-      wallet
-    );
+    console.log("🚀 Withdraw →", toAddress);
 
     const tx = await contract.transfer(
       toAddress,
       ethers.parseUnits(amount.toString(), 18)
     );
 
-    console.log("🚀 Withdraw:", tx.hash);
-
     await tx.wait();
 
-    await db.collection("users").updateOne(
-      { walletAddress },
-      { $inc: { "balances.sxp_eth": -amount } }
-    );
-
-    await db.collection("transactions").insertOne({
+    await Tx.create({
       walletAddress,
-      toAddress,
       amount,
       txHash: tx.hash,
       type: "withdraw",
-      createdAt: new Date()
+      chain: "ETH"
     });
 
-    res.json({ success: true, txHash: tx.hash });
+    res.json({
+      success: true,
+      txHash: tx.hash
+    });
 
   } catch (err) {
-    console.error(err);
+    console.log("❌ Withdraw error:", err.message);
     res.status(500).json({ error: "Withdraw failed" });
   }
 });
 
-// ===============================
-// HEARTBEAT
-// ===============================
-setInterval(() => {
-  console.log("💓 Heartbeat alive...");
-}, 15000);
+/* ================= BRIDGE ================= */
+function sendSolar(to, amount) {
+  console.log(`🌉 Solar send → ${to} | ${amount}`);
 
-// ===============================
-// ROUTES
-// ===============================
-app.get("/", (req, res) => {
-  res.send("SXP Secure Backend Running 🔥");
-});
-
-// ===============================
-// START SERVER
-// ===============================
-async function start() {
-  await connectDB();
-
-  console.log("🚀 Starting full system...");
-  startScanner();
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 Server running on ${PORT}`);
-  });
+  return {
+    hash: "solar_" + Date.now()
+  };
 }
 
-start();
+app.post("/bridge/solar", async (req, res) => {
+  try {
+    const { walletAddress, amount } = req.body;
+
+    const user = await User.findOne({ walletAddress });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    if (user.balances.sxp_eth < amount) {
+      return res.status(400).json({ error: "Insufficient balance" });
+    }
+
+    // 🔒 Deduct ETH
+    user.balances.sxp_eth -= amount;
+
+    // 💎 Credit Solar
+    user.balances.sxp_solar += amount;
+
+    await user.save();
+
+    const tx = sendSolar(walletAddress, amount);
+
+    await Tx.create({
+      walletAddress,
+      amount,
+      txHash: tx.hash,
+      type: "bridge",
+      chain: "SOLAR"
+    });
+
+    res.json({ success: true, tx });
+
+  } catch (err) {
+    console.log("❌ Bridge error:", err.message);
+    res.status(500).json({ error: "Bridge failed" });
+  }
+});
+
+/* ================= HEARTBEAT ================= */
+setInterval(() => {
+  console.log("💓 Heartbeat alive...");
+}, 10000);
+
+/* ================= START ================= */
+setInterval(scanDeposits, 15000);
+
+app.listen(process.env.PORT, () => {
+  console.log(`🚀 Server running on port ${process.env.PORT}`);
+});
