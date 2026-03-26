@@ -76,10 +76,10 @@ async function creditUser(walletAddress, amount, txHash, tokenAddress) {
 }
 
 // ===============================
-// 🔥 GLOBAL ERC20 LISTENER
+// 🔥 GLOBAL ERC20 LISTENER (CHUNKED)
 // ===============================
 function startListener() {
-  console.log("🔌 Using GLOBAL ERC20 scanner...");
+  console.log("🔌 Using GLOBAL ERC20 scanner (chunked)...");
 
   const provider = new ethers.JsonRpcProvider(
     process.env.RPC_URL,
@@ -96,59 +96,66 @@ function startListener() {
       const currentBlock = await provider.getBlockNumber();
 
       if (lastBlock === 0) {
-        lastBlock = currentBlock - 2000; // 🔥 scan past blocks
+        lastBlock = currentBlock - 500; // 🔥 safe startup window
         return;
       }
 
       console.log(`🔎 Scanning blocks: ${lastBlock} → ${currentBlock}`);
 
-      const logs = await provider.getLogs({
-        fromBlock: lastBlock,
-        toBlock: currentBlock,
-        topics: [
-          ethers.id("Transfer(address,address,uint256)")
-        ]
-      });
+      const STEP = 100; // 🔥 chunk size
 
-      for (const log of logs) {
-        try {
-          const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
-            ["address", "address", "uint256"],
-            log.data
-          );
+      let from = lastBlock;
 
-          const from = decoded[0];
-          const to = decoded[1];
-          const value = decoded[2];
+      while (from < currentBlock) {
+        const to = Math.min(from + STEP, currentBlock);
 
-          const toAddress = to.toLowerCase();
+        console.log(`📦 Chunk scan: ${from} → ${to}`);
 
-          const user = await db.collection("users").findOne({
-            walletAddress: toAddress
-          });
+        const logs = await provider.getLogs({
+          fromBlock: from,
+          toBlock: to,
+          topics: [
+            ethers.id("Transfer(address,address,uint256)")
+          ]
+        });
 
-          if (!user) continue;
+        for (const log of logs) {
+          try {
+            const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+              ["address", "address", "uint256"],
+              log.data
+            );
 
-          const amount = ethers.formatUnits(value, 18);
+            const toAddress = decoded[1].toLowerCase();
 
-          console.log("🔥 TOKEN DEPOSIT DETECTED:", {
-            token: log.address,
-            from,
-            to,
-            amount,
-            txHash: log.transactionHash
-          });
+            const user = await db.collection("users").findOne({
+              walletAddress: toAddress
+            });
 
-          await creditUser(
-            toAddress,
-            amount,
-            log.transactionHash,
-            log.address
-          );
+            if (!user) continue;
 
-        } catch (err) {
-          continue;
+            const amount = ethers.formatUnits(decoded[2], 18);
+
+            console.log("🔥 TOKEN DEPOSIT DETECTED:", {
+              token: log.address,
+              to: toAddress,
+              amount,
+              txHash: log.transactionHash
+            });
+
+            await creditUser(
+              toAddress,
+              amount,
+              log.transactionHash,
+              log.address
+            );
+
+          } catch {
+            continue;
+          }
         }
+
+        from = to + 1;
       }
 
       lastBlock = currentBlock;
