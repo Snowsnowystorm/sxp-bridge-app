@@ -42,7 +42,6 @@ app.post("/api/users/create", async (req, res) => {
     };
 
     await db.collection("users").insertOne(user);
-
     res.json(user);
 
   } catch (err) {
@@ -76,18 +75,39 @@ async function creditUser(walletAddress, amount, txHash, tokenAddress) {
 }
 
 // ===============================
-// 🔥 GLOBAL ERC20 LISTENER (CHUNKED)
+// 🔥 PROVIDER (WITH FALLBACK)
 // ===============================
-function startListener() {
-  console.log("🔌 Using GLOBAL ERC20 scanner (chunked)...");
-
-  const provider = new ethers.JsonRpcProvider(
+function createProvider() {
+  const urls = [
     process.env.RPC_URL,
-    {
+    "https://rpc.flashbots.net"
+  ];
+
+  let current = 0;
+
+  function getProvider() {
+    return new ethers.JsonRpcProvider(urls[current], {
       name: "mainnet",
       chainId: 1
-    }
-  );
+    });
+  }
+
+  function switchProvider() {
+    current = (current + 1) % urls.length;
+    console.log("🔄 Switching RPC →", urls[current]);
+  }
+
+  return { getProvider, switchProvider };
+}
+
+// ===============================
+// 🔥 GLOBAL ERC20 LISTENER
+// ===============================
+function startListener() {
+  console.log("🔌 Starting ERC20 scanner (production mode)...");
+
+  const rpcManager = createProvider();
+  let provider = rpcManager.getProvider();
 
   let lastBlock = 0;
 
@@ -96,63 +116,71 @@ function startListener() {
       const currentBlock = await provider.getBlockNumber();
 
       if (lastBlock === 0) {
-        lastBlock = currentBlock - 500; // 🔥 safe startup window
+        lastBlock = currentBlock - 300;
         return;
       }
 
       console.log(`🔎 Scanning blocks: ${lastBlock} → ${currentBlock}`);
 
-      const STEP = 100; // 🔥 chunk size
+      const STEP = 50; // 🔥 ultra stable
 
       let from = lastBlock;
 
       while (from < currentBlock) {
         const to = Math.min(from + STEP, currentBlock);
 
-        console.log(`📦 Chunk scan: ${from} → ${to}`);
+        console.log(`📦 Chunk: ${from} → ${to}`);
 
-        const logs = await provider.getLogs({
-          fromBlock: from,
-          toBlock: to,
-          topics: [
-            ethers.id("Transfer(address,address,uint256)")
-          ]
-        });
+        try {
+          const logs = await provider.getLogs({
+            fromBlock: from,
+            toBlock: to,
+            topics: [
+              ethers.id("Transfer(address,address,uint256)")
+            ]
+          });
 
-        for (const log of logs) {
-          try {
-            const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
-              ["address", "address", "uint256"],
-              log.data
-            );
+          for (const log of logs) {
+            try {
+              const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+                ["address", "address", "uint256"],
+                log.data
+              );
 
-            const toAddress = decoded[1].toLowerCase();
+              const toAddress = decoded[1].toLowerCase();
 
-            const user = await db.collection("users").findOne({
-              walletAddress: toAddress
-            });
+              const user = await db.collection("users").findOne({
+                walletAddress: toAddress
+              });
 
-            if (!user) continue;
+              if (!user) continue;
 
-            const amount = ethers.formatUnits(decoded[2], 18);
+              const amount = ethers.formatUnits(decoded[2], 18);
 
-            console.log("🔥 TOKEN DEPOSIT DETECTED:", {
-              token: log.address,
-              to: toAddress,
-              amount,
-              txHash: log.transactionHash
-            });
+              console.log("🔥 TOKEN DETECTED:", {
+                token: log.address,
+                to: toAddress,
+                amount,
+                txHash: log.transactionHash
+              });
 
-            await creditUser(
-              toAddress,
-              amount,
-              log.transactionHash,
-              log.address
-            );
+              await creditUser(
+                toAddress,
+                amount,
+                log.transactionHash,
+                log.address
+              );
 
-          } catch {
-            continue;
+            } catch {
+              continue;
+            }
           }
+
+        } catch (err) {
+          console.log("⚠️ RPC chunk failed → switching provider");
+          rpcManager.switchProvider();
+          provider = rpcManager.getProvider();
+          break;
         }
 
         from = to + 1;
