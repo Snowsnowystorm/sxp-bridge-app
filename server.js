@@ -116,18 +116,30 @@ async function creditUser(walletAddress, amount, txHash) {
 }
 
 // ===============================
-// 🔥 STABLE WEBSOCKET LISTENER
+// 🔥 FILTERED WEBSOCKET LISTENER
 // ===============================
 let ws = null;
 let reconnectDelay = 5000;
 
-function startDepositListener() {
+async function startDepositListener() {
   if (ws) {
-    console.log("⚠️ WebSocket already running");
+    console.log("⚠️ WS already running");
     return;
   }
 
   console.log("🔌 Connecting to Alchemy...");
+
+  // 🔥 LOAD USER WALLETS
+  const users = await db.collection("users").find().toArray();
+
+  const walletAddresses = users.map(u => ({
+    to: u.walletAddress
+  }));
+
+  if (walletAddresses.length === 0) {
+    console.log("⚠️ No wallets yet — skipping listener");
+    return;
+  }
 
   ws = new WebSocket(process.env.ALCHEMY_WS);
 
@@ -143,7 +155,7 @@ function startDepositListener() {
       params: [
         "alchemy_minedTransactions",
         {
-          addresses: [{ to: null }],
+          addresses: walletAddresses,
           hashesOnly: false
         }
       ]
