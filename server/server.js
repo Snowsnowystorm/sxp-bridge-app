@@ -9,7 +9,10 @@ import nacl from "tweetnacl";
 dotenv.config();
 
 const app = express();
+
+/* ================= CRITICAL MIDDLEWARE ================= */
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 /* ================= DEBUG ROUTES ================= */
 app.get("/", (req, res) => {
@@ -20,27 +23,14 @@ app.get("/withdraw", (req, res) => {
   res.send("Withdraw route exists ✅");
 });
 
-app.get("/bridge/solar", (req, res) => {
-  res.send("Solar route exists ✅");
-});
-
 /* ================= DATABASE ================= */
 mongoose.connect(process.env.DATABASE_URL);
 console.log("✅ DB connected");
 
-/* ================= ENV ================= */
+/* ================= ETH SETUP ================= */
 const PRIVATE_KEY = (process.env.PRIVATE_KEY || "").trim();
 
-/* ================= ETH ================= */
-const providerPrimary = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
-const providerFallback = new ethers.JsonRpcProvider(process.env.ETH_FALLBACK_RPC);
-
-let provider = providerPrimary;
-
-function switchProvider() {
-  console.log("🔄 Switching RPC...");
-  provider = provider === providerPrimary ? providerFallback : providerPrimary;
-}
+const provider = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
 
 let wallet = null;
 let contract = null;
@@ -109,8 +99,7 @@ async function sendSolar(toAddress, amount) {
     console.log("📡 Solar broadcast:", res.data);
 
     return {
-      id: res.data?.data?.accept?.[0] || "UNKNOWN",
-      raw: tx
+      id: res.data?.data?.accept?.[0] || "UNKNOWN"
     };
 
   } catch (err) {
@@ -120,93 +109,46 @@ async function sendSolar(toAddress, amount) {
 }
 
 /* ================= MODELS ================= */
-const userSchema = new mongoose.Schema({
-  walletAddress: String,
-  balances: {
-    sxp_eth: { type: Number, default: 0 },
-    sxp_solar: { type: Number, default: 0 }
-  }
-});
-
-const User = mongoose.model("User", userSchema);
-
-const txSchema = new mongoose.Schema({
-  walletAddress: String,
-  amount: String,
-  txHash: String,
-  type: String,
-  chain: String,
-  createdAt: { type: Date, default: Date.now }
-});
-
-const Tx = mongoose.model("Tx", txSchema);
-
-/* ================= SCANNER ================= */
-let lastBlock = 0;
-
-async function scanDeposits() {
-  try {
-    if (!contract) return;
-
-    const currentBlock = await provider.getBlockNumber();
-
-    if (!lastBlock) {
-      lastBlock = currentBlock - 20;
-      console.log("⚡ Starting scanner from:", lastBlock);
+const User = mongoose.model(
+  "User",
+  new mongoose.Schema({
+    walletAddress: String,
+    balances: {
+      sxp_eth: { type: Number, default: 0 },
+      sxp_solar: { type: Number, default: 0 }
     }
+  })
+);
 
-    const step = 15;
+const Tx = mongoose.model(
+  "Tx",
+  new mongoose.Schema({
+    walletAddress: String,
+    amount: Number,
+    txHash: String,
+    type: String,
+    chain: String,
+    createdAt: { type: Date, default: Date.now }
+  })
+);
 
-    for (let i = lastBlock; i < currentBlock; i += step) {
-      const toBlock = Math.min(i + step, currentBlock);
-
-      const logs = await provider.getLogs({
-        address: process.env.SXP_CONTRACT,
-        fromBlock: i,
-        toBlock: toBlock,
-        topics: [ethers.id("Transfer(address,address,uint256)")]
-      });
-
-      for (const log of logs) {
-        const parsed = contract.interface.parseLog(log);
-
-        const to = parsed.args.to.toLowerCase();
-        const amount = Number(ethers.formatUnits(parsed.args.amount, 18));
-
-        const user = await User.findOne({ walletAddress: to });
-
-        if (user) {
-          user.balances.sxp_eth += amount;
-          await user.save();
-
-          await Tx.create({
-            walletAddress: to,
-            amount,
-            txHash: log.transactionHash,
-            type: "deposit",
-            chain: "ETH"
-          });
-
-          console.log("💰 Deposit:", amount);
-        }
-      }
-    }
-
-    lastBlock = currentBlock;
-
-  } catch (err) {
-    console.log("❌ Scanner error:", err.message);
-    switchProvider();
-  }
-}
-
-/* ================= WITHDRAW ================= */
+/* ================= 🔥 POST WITHDRAW (FIXED) ================= */
 app.post("/withdraw", async (req, res) => {
+  console.log("🔥 POST /withdraw HIT");
+  console.log("📦 BODY:", req.body);
+
   try {
     const { walletAddress, toAddress, amount } = req.body;
 
+    if (!wallet) {
+      return res.status(500).json({ error: "Wallet not configured" });
+    }
+
     const user = await User.findOne({ walletAddress });
-    if (!user) return res.status(404).json({ error: "User not found" });
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
 
     if (user.balances.sxp_eth < amount) {
       return res.status(400).json({ error: "Insufficient balance" });
@@ -238,13 +180,18 @@ app.post("/withdraw", async (req, res) => {
   }
 });
 
-/* ================= BRIDGE ================= */
+/* ================= SOLAR BRIDGE ================= */
 app.post("/bridge/solar", async (req, res) => {
+  console.log("🌞 POST /bridge/solar HIT");
+
   try {
     const { walletAddress, solarAddress, amount } = req.body;
 
     const user = await User.findOne({ walletAddress });
-    if (!user) return res.status(404).json({ error: "User not found" });
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
 
     if (user.balances.sxp_eth < amount) {
       return res.status(400).json({ error: "Insufficient balance" });
@@ -264,10 +211,7 @@ app.post("/bridge/solar", async (req, res) => {
       chain: "SOLAR"
     });
 
-    res.json({
-      success: true,
-      solarTxId: tx.id
-    });
+    res.json({ success: true, solarTxId: tx.id });
 
   } catch (err) {
     console.log("❌ Bridge error:", err.message);
@@ -276,8 +220,6 @@ app.post("/bridge/solar", async (req, res) => {
 });
 
 /* ================= START ================= */
-setInterval(scanDeposits, 15000);
-
-app.listen(process.env.PORT, () => {
+app.listen(process.env.PORT || 3000, () => {
   console.log(`🚀 Server running on port ${process.env.PORT}`);
 });
