@@ -3,6 +3,8 @@ import dotenv from "dotenv";
 import mongoose from "mongoose";
 import { ethers } from "ethers";
 import axios from "axios";
+import bip39 from "bip39";
+import nacl from "tweetnacl";
 
 dotenv.config();
 
@@ -13,13 +15,10 @@ app.use(express.json());
 mongoose.connect(process.env.DATABASE_URL);
 console.log("✅ DB connected");
 
-/* ================= ENV DEBUG ================= */
-console.log("🔑 RAW PRIVATE KEY:", process.env.PRIVATE_KEY);
-console.log("🔑 LENGTH:", process.env.PRIVATE_KEY?.length);
-
+/* ================= ENV ================= */
 const PRIVATE_KEY = (process.env.PRIVATE_KEY || "").trim();
 
-/* ================= ETH PROVIDERS ================= */
+/* ================= ETH ================= */
 const providerPrimary = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
 const providerFallback = new ethers.JsonRpcProvider(process.env.ETH_FALLBACK_RPC);
 
@@ -30,7 +29,6 @@ function switchProvider() {
   provider = provider === providerPrimary ? providerFallback : providerPrimary;
 }
 
-/* ================= ETH WALLET ================= */
 let wallet = null;
 let contract = null;
 
@@ -48,10 +46,64 @@ try {
       wallet
     );
   } else {
-    console.log("❌ INVALID PRIVATE KEY FORMAT — withdraw disabled");
+    console.log("❌ Invalid ETH private key");
   }
 } catch (err) {
   console.log("❌ Wallet init failed:", err.message);
+}
+
+/* ================= SOLAR KEYS ================= */
+function getSolarKeys() {
+  const mnemonic = process.env.SOLAR_PASSPHRASE.trim();
+  const seed = bip39.mnemonicToSeedSync(mnemonic).slice(0, 32);
+  const keyPair = nacl.sign.keyPair.fromSeed(seed);
+
+  return {
+    publicKey: Buffer.from(keyPair.publicKey).toString("hex"),
+    privateKey: Buffer.from(keyPair.secretKey).toString("hex")
+  };
+}
+
+/* ================= SOLAR SEND ================= */
+async function sendSolar(toAddress, amount) {
+  try {
+    console.log("🌞 Building Solar TX...");
+
+    const keys = getSolarKeys();
+
+    const tx = {
+      type: 0,
+      amount: Math.floor(amount * 1e8),
+      fee: 10000000,
+      recipientId: toAddress,
+      senderPublicKey: keys.publicKey,
+      timestamp: Math.floor(Date.now() / 1000)
+    };
+
+    const message = JSON.stringify(tx);
+
+    const signature = nacl.sign.detached(
+      Buffer.from(message),
+      Buffer.from(keys.privateKey, "hex")
+    );
+
+    tx.signature = Buffer.from(signature).toString("hex");
+
+    const res = await axios.post(`${process.env.SOLAR_API}/transactions`, {
+      transactions: [tx]
+    });
+
+    console.log("📡 Solar broadcast:", res.data);
+
+    return {
+      id: res.data?.data?.accept?.[0] || "UNKNOWN",
+      raw: tx
+    };
+
+  } catch (err) {
+    console.log("❌ Solar error:", err.response?.data || err.message);
+    throw err;
+  }
 }
 
 /* ================= MODELS ================= */
@@ -95,8 +147,6 @@ async function scanDeposits() {
     for (let i = lastBlock; i < currentBlock; i += step) {
       const toBlock = Math.min(i + step, currentBlock);
 
-      console.log(`📦 Chunk: ${i} → ${toBlock}`);
-
       const logs = await provider.getLogs({
         address: process.env.SXP_CONTRACT,
         fromBlock: i,
@@ -137,36 +187,10 @@ async function scanDeposits() {
   }
 }
 
-/* ================= SOLAR (API MODE - SAFE PLACEHOLDER) ================= */
-async function sendSolar(toAddress, amount) {
-  try {
-    console.log("🌞 Solar bridge placeholder triggered");
-
-    // ⚠️ Real signing + broadcast comes next phase
-    return {
-      id: "SOLAR_PENDING",
-      to: toAddress,
-      amount
-    };
-
-  } catch (err) {
-    console.log("❌ Solar send error:", err.message);
-    throw err;
-  }
-}
-
-/* ================= WITHDRAW (ETH) ================= */
+/* ================= WITHDRAW ================= */
 app.post("/withdraw", async (req, res) => {
   try {
-    if (!wallet) {
-      return res.status(500).json({ error: "Wallet not configured" });
-    }
-
     const { walletAddress, toAddress, amount } = req.body;
-
-    if (!ethers.isAddress(toAddress)) {
-      return res.status(400).json({ error: "Invalid ETH address" });
-    }
 
     const user = await User.findOne({ walletAddress });
     if (!user) return res.status(404).json({ error: "User not found" });
@@ -201,7 +225,7 @@ app.post("/withdraw", async (req, res) => {
   }
 });
 
-/* ================= BRIDGE TO SOLAR ================= */
+/* ================= BRIDGE ================= */
 app.post("/bridge/solar", async (req, res) => {
   try {
     const { walletAddress, solarAddress, amount } = req.body;
@@ -229,8 +253,7 @@ app.post("/bridge/solar", async (req, res) => {
 
     res.json({
       success: true,
-      message: "Solar bridge initiated (pending real transfer)",
-      tx
+      solarTxId: tx.id
     });
 
   } catch (err) {
@@ -238,11 +261,6 @@ app.post("/bridge/solar", async (req, res) => {
     res.status(500).json({ error: "Bridge failed" });
   }
 });
-
-/* ================= HEARTBEAT ================= */
-setInterval(() => {
-  console.log("💓 Heartbeat alive...");
-}, 10000);
 
 /* ================= START ================= */
 setInterval(scanDeposits, 15000);
