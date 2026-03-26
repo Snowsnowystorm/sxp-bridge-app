@@ -2,10 +2,7 @@ import express from "express";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import { ethers } from "ethers";
-
-// ☀️ Solar imports
-import { Transactions, Identities } from "@solar-network/crypto";
-import Client from "@solar-network/client";
+import fetch from "node-fetch";
 
 dotenv.config();
 
@@ -38,7 +35,7 @@ const txSchema = new mongoose.Schema({
 
 const Tx = mongoose.model("Tx", txSchema);
 
-/* ================= ETH PROVIDERS ================= */
+/* ================= PROVIDERS ================= */
 const providerPrimary = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
 const providerFallback = new ethers.JsonRpcProvider(process.env.ETH_FALLBACK_RPC);
 
@@ -53,7 +50,7 @@ function switchProvider() {
 const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
 console.log("🔥 Hot Wallet:", wallet.address);
 
-/* ================= SXP CONTRACT ================= */
+/* ================= CONTRACT ================= */
 const contract = new ethers.Contract(
   process.env.SXP_CONTRACT,
   [
@@ -62,43 +59,6 @@ const contract = new ethers.Contract(
   ],
   wallet
 );
-
-/* ================= SOLAR SETUP ================= */
-const solarClient = new Client(process.env.SOLAR_API);
-
-const solarPassphrase = process.env.SOLAR_PASSPHRASE;
-const solarAddress = Identities.Address.fromPassphrase(solarPassphrase);
-
-console.log("☀️ Solar Wallet:", solarAddress);
-
-/* ================= SOLAR SEND ================= */
-async function sendSolar(to, amount) {
-  try {
-    console.log(`🌉 Sending REAL Solar → ${to} | ${amount}`);
-
-    const transaction = Transactions.BuilderFactory.transfer()
-      .recipientId(to)
-      .amount(Math.floor(amount * 1e8)) // Solar uses 8 decimals
-      .sign(solarPassphrase)
-      .getStruct();
-
-    const response = await solarClient.api("transactions").create({
-      transactions: [transaction]
-    });
-
-    if (!response.data.accept || response.data.accept.length === 0) {
-      throw new Error("Solar TX rejected");
-    }
-
-    return {
-      hash: transaction.id
-    };
-
-  } catch (err) {
-    console.log("❌ Solar send error:", err.message);
-    throw err;
-  }
-}
 
 /* ================= SCANNER ================= */
 let lastBlock = 0;
@@ -175,7 +135,7 @@ app.post("/withdraw", async (req, res) => {
       return res.status(400).json({ error: "Insufficient balance" });
     }
 
-    // 🔒 Deduct BEFORE sending
+    // 🔒 Deduct first
     user.balances.sxp_eth -= amount;
     await user.save();
 
@@ -207,7 +167,8 @@ app.post("/withdraw", async (req, res) => {
   }
 });
 
-/* ================= BRIDGE ETH → SOLAR ================= */
+/* ================= SOLAR BRIDGE (QUEUE MODE) ================= */
+
 app.post("/bridge/solar", async (req, res) => {
   try {
     const { walletAddress, solarAddress, amount } = req.body;
@@ -223,24 +184,28 @@ app.post("/bridge/solar", async (req, res) => {
       return res.status(400).json({ error: "Insufficient balance" });
     }
 
-    // 🔒 Deduct BEFORE sending
+    // 🔒 Deduct ETH
     user.balances.sxp_eth -= amount;
+
+    // 💎 Credit Solar (internal)
+    user.balances.sxp_solar += amount;
+
     await user.save();
 
-    // ☀️ SEND REAL SOLAR
-    const tx = await sendSolar(solarAddress, amount);
-
+    // 🧾 LOG BRIDGE REQUEST (QUEUE STYLE)
     await Tx.create({
       walletAddress,
       amount,
-      txHash: tx.hash,
+      txHash: "PENDING_SOLAR_" + Date.now(),
       type: "bridge",
       chain: "SOLAR"
     });
 
+    console.log("🌉 Bridge queued →", solarAddress, amount);
+
     res.json({
       success: true,
-      solarTx: tx.hash
+      message: "Bridge queued (Solar payout pending)"
     });
 
   } catch (err) {
