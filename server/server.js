@@ -79,8 +79,8 @@ async function creditUser(walletAddress, amount, txHash, tokenAddress) {
 // ===============================
 function createProvider() {
   const urls = [
-    process.env.RPC_URL,               // Alchemy
-    "https://rpc.flashbots.net"        // Backup
+    process.env.RPC_URL,
+    "https://rpc.flashbots.net"
   ];
 
   let current = 0;
@@ -101,15 +101,17 @@ function createProvider() {
 }
 
 // ===============================
-// 🔥 GLOBAL ERC20 LISTENER
+// 🔥 ERC20 LISTENER (FIXED)
 // ===============================
 function startListener() {
-  console.log("🔌 Starting ERC20 scanner (production mode)...");
+  console.log("🔌 Starting ERC20 scanner (SXP mode)...");
 
   const rpcManager = createProvider();
   let provider = rpcManager.getProvider();
 
   let lastBlock = 0;
+
+  const SXP_CONTRACT = "0x8ce9137d39326ad0cd22f6e7b27f55f6c7c72b45";
 
   setInterval(async () => {
     try {
@@ -117,7 +119,7 @@ function startListener() {
 
       if (lastBlock === 0) {
         lastBlock = currentBlock - 200;
-        return;
+        console.log("⚡ Initializing scanner from block:", lastBlock);
       }
 
       console.log(`🔎 Scanning blocks: ${lastBlock} → ${currentBlock}`);
@@ -127,7 +129,7 @@ function startListener() {
 
       while (from < currentBlock) {
 
-        await new Promise(r => setTimeout(r, 200)); // 🔥 prevent CPU spike
+        await new Promise(r => setTimeout(r, 200)); // prevent overload
 
         const to = Math.min(from + STEP, currentBlock);
 
@@ -135,6 +137,7 @@ function startListener() {
 
         try {
           const logs = await provider.getLogs({
+            address: SXP_CONTRACT, // 🔥 FILTER ONLY SXP
             fromBlock: from,
             toBlock: to,
             topics: [
@@ -144,12 +147,11 @@ function startListener() {
 
           for (const log of logs) {
             try {
-              const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
-                ["address", "address", "uint256"],
-                log.data
-              );
+              // ✅ CORRECT ERC20 PARSING
+              const fromAddr = "0x" + log.topics[1].slice(26);
+              const toAddr = "0x" + log.topics[2].slice(26);
 
-              const toAddress = decoded[1].toLowerCase();
+              const toAddress = toAddr.toLowerCase();
 
               const user = await db.collection("users").findOne({
                 walletAddress: toAddress
@@ -157,10 +159,9 @@ function startListener() {
 
               if (!user) continue;
 
-              const amount = ethers.formatUnits(decoded[2], 18);
+              const amount = ethers.formatUnits(log.data, 18);
 
-              console.log("🔥 TOKEN DETECTED:", {
-                token: log.address,
+              console.log("🔥 SXP DEPOSIT DETECTED:", {
                 to: toAddress,
                 amount,
                 txHash: log.transactionHash
@@ -197,7 +198,7 @@ function startListener() {
 }
 
 // ===============================
-// 💓 KEEP ALIVE (RAILWAY SAFE)
+// 💓 KEEP ALIVE
 // ===============================
 setInterval(() => {
   console.log("💓 Heartbeat alive...");
@@ -211,10 +212,7 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.status(200).json({
-    status: "alive",
-    time: new Date()
-  });
+  res.json({ status: "alive" });
 });
 
 // ===============================
