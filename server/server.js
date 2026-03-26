@@ -3,6 +3,10 @@ import dotenv from "dotenv";
 import mongoose from "mongoose";
 import { ethers } from "ethers";
 
+// ☀️ Solar imports
+import { Transactions, Identities } from "@solar-network/crypto";
+import Client from "@solar-network/client";
+
 dotenv.config();
 
 const app = express();
@@ -34,7 +38,7 @@ const txSchema = new mongoose.Schema({
 
 const Tx = mongoose.model("Tx", txSchema);
 
-/* ================= PROVIDERS ================= */
+/* ================= ETH PROVIDERS ================= */
 const providerPrimary = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
 const providerFallback = new ethers.JsonRpcProvider(process.env.ETH_FALLBACK_RPC);
 
@@ -47,10 +51,9 @@ function switchProvider() {
 
 /* ================= HOT WALLET ================= */
 const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
-
 console.log("🔥 Hot Wallet:", wallet.address);
 
-/* ================= CONTRACT ================= */
+/* ================= SXP CONTRACT ================= */
 const contract = new ethers.Contract(
   process.env.SXP_CONTRACT,
   [
@@ -59,6 +62,43 @@ const contract = new ethers.Contract(
   ],
   wallet
 );
+
+/* ================= SOLAR SETUP ================= */
+const solarClient = new Client(process.env.SOLAR_API);
+
+const solarPassphrase = process.env.SOLAR_PASSPHRASE;
+const solarAddress = Identities.Address.fromPassphrase(solarPassphrase);
+
+console.log("☀️ Solar Wallet:", solarAddress);
+
+/* ================= SOLAR SEND ================= */
+async function sendSolar(to, amount) {
+  try {
+    console.log(`🌉 Sending REAL Solar → ${to} | ${amount}`);
+
+    const transaction = Transactions.BuilderFactory.transfer()
+      .recipientId(to)
+      .amount(Math.floor(amount * 1e8)) // Solar uses 8 decimals
+      .sign(solarPassphrase)
+      .getStruct();
+
+    const response = await solarClient.api("transactions").create({
+      transactions: [transaction]
+    });
+
+    if (!response.data.accept || response.data.accept.length === 0) {
+      throw new Error("Solar TX rejected");
+    }
+
+    return {
+      hash: transaction.id
+    };
+
+  } catch (err) {
+    console.log("❌ Solar send error:", err.message);
+    throw err;
+  }
+}
 
 /* ================= SCANNER ================= */
 let lastBlock = 0;
@@ -125,7 +165,7 @@ app.post("/withdraw", async (req, res) => {
     const { walletAddress, toAddress, amount } = req.body;
 
     if (!ethers.isAddress(toAddress)) {
-      return res.status(400).json({ error: "Invalid address" });
+      return res.status(400).json({ error: "Invalid ETH address" });
     }
 
     const user = await User.findOne({ walletAddress });
@@ -135,7 +175,7 @@ app.post("/withdraw", async (req, res) => {
       return res.status(400).json({ error: "Insufficient balance" });
     }
 
-    // 🔒 Deduct first
+    // 🔒 Deduct BEFORE sending
     user.balances.sxp_eth -= amount;
     await user.save();
 
@@ -167,18 +207,14 @@ app.post("/withdraw", async (req, res) => {
   }
 });
 
-/* ================= BRIDGE ================= */
-function sendSolar(to, amount) {
-  console.log(`🌉 Solar send → ${to} | ${amount}`);
-
-  return {
-    hash: "solar_" + Date.now()
-  };
-}
-
+/* ================= BRIDGE ETH → SOLAR ================= */
 app.post("/bridge/solar", async (req, res) => {
   try {
-    const { walletAddress, amount } = req.body;
+    const { walletAddress, solarAddress, amount } = req.body;
+
+    if (!solarAddress || !solarAddress.startsWith("S")) {
+      return res.status(400).json({ error: "Invalid Solar address" });
+    }
 
     const user = await User.findOne({ walletAddress });
     if (!user) return res.status(404).json({ error: "User not found" });
@@ -187,15 +223,12 @@ app.post("/bridge/solar", async (req, res) => {
       return res.status(400).json({ error: "Insufficient balance" });
     }
 
-    // 🔒 Deduct ETH
+    // 🔒 Deduct BEFORE sending
     user.balances.sxp_eth -= amount;
-
-    // 💎 Credit Solar
-    user.balances.sxp_solar += amount;
-
     await user.save();
 
-    const tx = sendSolar(walletAddress, amount);
+    // ☀️ SEND REAL SOLAR
+    const tx = await sendSolar(solarAddress, amount);
 
     await Tx.create({
       walletAddress,
@@ -205,7 +238,10 @@ app.post("/bridge/solar", async (req, res) => {
       chain: "SOLAR"
     });
 
-    res.json({ success: true, tx });
+    res.json({
+      success: true,
+      solarTx: tx.hash
+    });
 
   } catch (err) {
     console.log("❌ Bridge error:", err.message);
