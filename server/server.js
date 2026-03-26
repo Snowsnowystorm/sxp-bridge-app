@@ -75,12 +75,12 @@ async function creditUser(walletAddress, amount, txHash, tokenAddress) {
 }
 
 // ===============================
-// 🔥 PROVIDER (WITH FALLBACK)
+// 🔥 PROVIDER (MULTI RPC)
 // ===============================
 function createProvider() {
   const urls = [
-    process.env.RPC_URL,
-    "https://rpc.flashbots.net"
+    process.env.RPC_URL,               // Alchemy
+    "https://rpc.flashbots.net"        // Backup
   ];
 
   let current = 0;
@@ -116,17 +116,19 @@ function startListener() {
       const currentBlock = await provider.getBlockNumber();
 
       if (lastBlock === 0) {
-        lastBlock = currentBlock - 300;
+        lastBlock = currentBlock - 200;
         return;
       }
 
       console.log(`🔎 Scanning blocks: ${lastBlock} → ${currentBlock}`);
 
-      const STEP = 50; // 🔥 ultra stable
-
+      const STEP = 20;
       let from = lastBlock;
 
       while (from < currentBlock) {
+
+        await new Promise(r => setTimeout(r, 200)); // 🔥 prevent CPU spike
+
         const to = Math.min(from + STEP, currentBlock);
 
         console.log(`📦 Chunk: ${from} → ${to}`);
@@ -195,6 +197,13 @@ function startListener() {
 }
 
 // ===============================
+// 💓 KEEP ALIVE (RAILWAY SAFE)
+// ===============================
+setInterval(() => {
+  console.log("💓 Heartbeat alive...");
+}, 15000);
+
+// ===============================
 // 🌐 ROUTES
 // ===============================
 app.get("/", (req, res) => {
@@ -202,7 +211,10 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
+  res.status(200).json({
+    status: "alive",
+    time: new Date()
+  });
 });
 
 // ===============================
@@ -211,13 +223,8 @@ app.get("/health", (req, res) => {
 async function startServer() {
   await connectDB();
 
-  const userCount = await db.collection("users").countDocuments();
-
-  if (userCount === 0) {
-    console.log("⚠️ No wallets yet — skipping listener");
-  } else {
-    startListener();
-  }
+  console.log("🚀 Starting listener...");
+  startListener();
 
   const PORT = process.env.PORT || 8000;
 
