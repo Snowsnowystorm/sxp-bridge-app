@@ -2,7 +2,6 @@ import express from "express";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import { ethers } from "ethers";
-import fetch from "node-fetch";
 
 dotenv.config();
 
@@ -135,7 +134,7 @@ app.post("/withdraw", async (req, res) => {
       return res.status(400).json({ error: "Insufficient balance" });
     }
 
-    // 🔒 Deduct first
+    // 🔒 Deduct first (prevents double spend)
     user.balances.sxp_eth -= amount;
     await user.save();
 
@@ -167,8 +166,7 @@ app.post("/withdraw", async (req, res) => {
   }
 });
 
-/* ================= SOLAR BRIDGE (QUEUE MODE) ================= */
-
+/* ================= BRIDGE (QUEUE SYSTEM) ================= */
 app.post("/bridge/solar", async (req, res) => {
   try {
     const { walletAddress, solarAddress, amount } = req.body;
@@ -187,12 +185,11 @@ app.post("/bridge/solar", async (req, res) => {
     // 🔒 Deduct ETH
     user.balances.sxp_eth -= amount;
 
-    // 💎 Credit Solar (internal)
+    // 💎 Credit Solar (internal balance)
     user.balances.sxp_solar += amount;
 
     await user.save();
 
-    // 🧾 LOG BRIDGE REQUEST (QUEUE STYLE)
     await Tx.create({
       walletAddress,
       amount,
