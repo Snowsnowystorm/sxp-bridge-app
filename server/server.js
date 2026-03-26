@@ -3,39 +3,27 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { MongoClient } from "mongodb";
 import { ethers } from "ethers";
-import WebSocket from "ws";
 
 dotenv.config();
 
 const app = express();
-
-// ===============================
-// 🔐 MIDDLEWARE
-// ===============================
 app.use(express.json());
-app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS || "*"
-}));
+app.use(cors({ origin: "*" }));
 
 // ===============================
-// 🔥 DATABASE CONNECTION
+// 🔥 DATABASE
 // ===============================
 const client = new MongoClient(process.env.DATABASE_URL);
 let db;
 
 async function connectDB() {
-  try {
-    await client.connect();
-    db = client.db("sxp_bridge");
-    console.log("✅ DB connected");
-  } catch (err) {
-    console.error("❌ DB connection failed:", err);
-    process.exit(1);
-  }
+  await client.connect();
+  db = client.db("sxp_bridge");
+  console.log("✅ DB connected");
 }
 
 // ===============================
-// 👤 CREATE USER + WALLET
+// 👤 CREATE USER
 // ===============================
 app.post("/api/users/create", async (req, res) => {
   try {
@@ -55,33 +43,10 @@ app.post("/api/users/create", async (req, res) => {
 
     await db.collection("users").insertOne(user);
 
-    res.json({
-      success: true,
-      wallet: user.walletAddress,
-      mnemonic: user.mnemonic,
-      privateKey: user.privateKey
-    });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "User creation failed" });
-  }
-});
-
-// ===============================
-// 📊 GET USER
-// ===============================
-app.get("/api/users/:wallet", async (req, res) => {
-  try {
-    const user = await db.collection("users").findOne({
-      walletAddress: req.params.wallet.toLowerCase()
-    });
-
-    if (!user) return res.status(404).json({ error: "User not found" });
-
     res.json(user);
+
   } catch (err) {
-    res.status(500).json({ error: "Fetch failed" });
+    res.status(500).json({ error: "User creation failed" });
   }
 });
 
@@ -89,130 +54,76 @@ app.get("/api/users/:wallet", async (req, res) => {
 // 💰 CREDIT USER
 // ===============================
 async function creditUser(walletAddress, amount, txHash) {
-  try {
-    const existing = await db.collection("transactions").findOne({ txHash });
-    if (existing) return;
+  const exists = await db.collection("transactions").findOne({ txHash });
+  if (exists) return;
 
-    const user = await db.collection("users").findOne({
-      walletAddress: walletAddress.toLowerCase()
-    });
+  await db.collection("users").updateOne(
+    { walletAddress: walletAddress.toLowerCase() },
+    { $inc: { "balances.sxp_eth": parseFloat(amount) } }
+  );
 
-    if (!user) return;
+  await db.collection("transactions").insertOne({
+    walletAddress,
+    amount,
+    txHash,
+    type: "deposit",
+    token: "SXP",
+    createdAt: new Date()
+  });
 
-    await db.collection("users").updateOne(
-      { walletAddress: walletAddress.toLowerCase() },
-      { $inc: { "balances.sxp_eth": parseFloat(amount) } }
-    );
-
-    await db.collection("transactions").insertOne({
-      walletAddress,
-      amount,
-      txHash,
-      type: "deposit",
-      createdAt: new Date()
-    });
-
-    console.log("💰 CREDITED:", walletAddress, amount);
-
-  } catch (err) {
-    console.error("Credit error:", err);
-  }
+  console.log("💰 CREDITED:", walletAddress, amount);
 }
 
 // ===============================
-// 🔥 WEBSOCKET LISTENER (SAFE)
+// 🔥 SXP ERC20 LISTENER
 // ===============================
-let ws = null;
-let reconnectDelay = 5000;
+function startListener() {
+  const provider = new ethers.WebSocketProvider(process.env.ALCHEMY_WS);
 
-async function startDepositListener() {
-  if (ws) {
-    console.log("⚠️ WS already running");
-    return;
-  }
+  const SXP_CONTRACT = process.env.SXP_ETH_CONTRACT;
 
-  console.log("🔌 Connecting to Alchemy...");
+  const abi = [
+    "event Transfer(address indexed from, address indexed to, uint256 value)"
+  ];
 
-  try {
-    // 🔥 Load user wallets
-    const users = await db.collection("users").find().toArray();
+  const contract = new ethers.Contract(SXP_CONTRACT, abi, provider);
 
-    const walletAddresses = users.map(u => ({
-      to: u.walletAddress
-    }));
+  console.log("🚀 Listening for SXP token deposits...");
 
-    if (walletAddresses.length === 0) {
-      console.log("⚠️ No wallets yet — skipping listener");
-      return;
+  contract.on("Transfer", async (from, to, value, event) => {
+    try {
+      const toAddress = to.toLowerCase();
+
+      const user = await db.collection("users").findOne({
+        walletAddress: toAddress
+      });
+
+      if (!user) return;
+
+      const amount = ethers.formatUnits(value, 18);
+
+      console.log("🔥 SXP DEPOSIT DETECTED:", {
+        from,
+        to,
+        amount,
+        tx: event.log.transactionHash
+      });
+
+      await creditUser(toAddress, amount, event.log.transactionHash);
+
+    } catch (err) {
+      console.error("Listener error:", err);
     }
+  });
 
-    ws = new WebSocket(process.env.ALCHEMY_WS);
+  provider.on("error", (err) => {
+    console.error("❌ WS error:", err.message);
+  });
 
-    ws.on("open", () => {
-      console.log("🚀 Connected to Alchemy WebSocket");
-
-      reconnectDelay = 5000;
-
-      ws.send(JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_subscribe",
-        params: [
-          "alchemy_minedTransactions",
-          {
-            addresses: walletAddresses,
-            hashesOnly: false
-          }
-        ]
-      }));
-    });
-
-    ws.on("message", async (data) => {
-      try {
-        const msg = JSON.parse(data);
-        if (!msg.params) return;
-
-        const tx = msg.params.result.transaction;
-        const to = tx.to?.toLowerCase();
-        if (!to) return;
-
-        const user = await db.collection("users").findOne({
-          walletAddress: to
-        });
-
-        if (!user) return;
-
-        console.log("🔥 DEPOSIT DETECTED");
-
-        await creditUser(
-          to,
-          ethers.formatEther(tx.value),
-          tx.hash
-        );
-
-      } catch (err) {
-        console.error("WS parse error:", err);
-      }
-    });
-
-    ws.on("error", (err) => {
-      console.error("❌ WS error:", err.message);
-    });
-
-    ws.on("close", () => {
-      console.log(`⚠️ WS closed. Reconnecting in ${reconnectDelay / 1000}s...`);
-
-      ws = null;
-
-      setTimeout(() => {
-        reconnectDelay = Math.min(reconnectDelay * 2, 60000);
-        startDepositListener();
-      }, reconnectDelay);
-    });
-
-  } catch (err) {
-    console.error("❌ WS INIT ERROR:", err);
-  }
+  provider.on("close", () => {
+    console.log("⚠️ WS closed — reconnecting in 5s...");
+    setTimeout(startListener, 5000);
+  });
 }
 
 // ===============================
@@ -227,14 +138,20 @@ app.get("/health", (req, res) => {
 });
 
 // ===============================
-// 🚀 START SERVER (RAILWAY FIX)
+// 🚀 START SERVER
 // ===============================
 async function startServer() {
   await connectDB();
 
-  startDepositListener();
+  const userCount = await db.collection("users").countDocuments();
 
-  const PORT = process.env.PORT || 3000;
+  if (userCount === 0) {
+    console.log("⚠️ No wallets yet — skipping listener");
+  } else {
+    startListener();
+  }
+
+  const PORT = process.env.PORT || 8000;
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`🚀 Server running on port ${PORT}`);
