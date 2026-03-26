@@ -75,21 +75,19 @@ async function creditUser(walletAddress, amount, txHash, tokenAddress) {
 }
 
 // ===============================
-// 🔥 PROVIDER (MULTI RPC)
+// 🔥 MULTI RPC PROVIDER
 // ===============================
 function createProvider() {
   const urls = [
-    process.env.RPC_URL,
-    "https://rpc.flashbots.net"
+    "https://rpc.flashbots.net",
+    "https://ethereum.publicnode.com",
+    "https://cloudflare-eth.com"
   ];
 
   let current = 0;
 
   function getProvider() {
-    return new ethers.JsonRpcProvider(urls[current], {
-      name: "mainnet",
-      chainId: 1
-    });
+    return new ethers.JsonRpcProvider(urls[current]);
   }
 
   function switchProvider() {
@@ -101,7 +99,7 @@ function createProvider() {
 }
 
 // ===============================
-// 🔥 ERC20 LISTENER (FIXED)
+// 🔥 ERC20 LISTENER (SXP ONLY)
 // ===============================
 function startListener() {
   console.log("🔌 Starting ERC20 scanner (SXP mode)...");
@@ -137,7 +135,7 @@ function startListener() {
 
         try {
           const logs = await provider.getLogs({
-            address: SXP_CONTRACT, // 🔥 FILTER ONLY SXP
+            address: SXP_CONTRACT,
             fromBlock: from,
             toBlock: to,
             topics: [
@@ -147,7 +145,7 @@ function startListener() {
 
           for (const log of logs) {
             try {
-              // ✅ CORRECT ERC20 PARSING
+              // ✅ Correct ERC20 parsing
               const fromAddr = "0x" + log.topics[1].slice(26);
               const toAddr = "0x" + log.topics[2].slice(26);
 
@@ -162,6 +160,7 @@ function startListener() {
               const amount = ethers.formatUnits(log.data, 18);
 
               console.log("🔥 SXP DEPOSIT DETECTED:", {
+                from: fromAddr,
                 to: toAddress,
                 amount,
                 txHash: log.transactionHash
@@ -180,7 +179,12 @@ function startListener() {
           }
 
         } catch (err) {
-          console.log("⚠️ RPC chunk failed → switching provider");
+          if (err.message.includes("429")) {
+            console.log("🚫 Rate limited → switching RPC");
+          } else {
+            console.log("⚠️ RPC chunk failed → switching provider");
+          }
+
           rpcManager.switchProvider();
           provider = rpcManager.getProvider();
           break;
@@ -192,13 +196,19 @@ function startListener() {
       lastBlock = currentBlock;
 
     } catch (err) {
-      console.error("❌ Polling error:", err.message);
+      if (err.message.includes("429")) {
+        console.log("🚫 Polling rate limited → switching RPC");
+        rpcManager.switchProvider();
+        provider = rpcManager.getProvider();
+      } else {
+        console.error("❌ Polling error:", err.message);
+      }
     }
   }, 20000);
 }
 
 // ===============================
-// 💓 KEEP ALIVE
+// 💓 KEEP ALIVE (RAILWAY SAFE)
 // ===============================
 setInterval(() => {
   console.log("💓 Heartbeat alive...");
