@@ -25,28 +25,26 @@ const ERC20_ABI = [
 ];
 
 // ===============================
-// RATE LIMIT (BASIC)
+// RPC FAILOVER
 // ===============================
-const withdrawCooldown = new Map();
+const RPCS = [
+  "https://rpc.flashbots.net",
+  "https://ethereum.publicnode.com",
+  "https://cloudflare-eth.com"
+];
 
-function checkRateLimit(wallet) {
-  const now = Date.now();
-  const last = withdrawCooldown.get(wallet);
+let rpcIndex = 0;
 
-  if (last && now - last < 30000) {
-    return false;
-  }
-
-  withdrawCooldown.set(wallet, now);
-  return true;
+function getProvider() {
+  return new ethers.JsonRpcProvider(RPCS[rpcIndex]);
 }
 
-// ===============================
-// RPC
-// ===============================
-const provider = new ethers.JsonRpcProvider(
-  "https://rpc.flashbots.net"
-);
+function switchRPC() {
+  rpcIndex = (rpcIndex + 1) % RPCS.length;
+  console.log("🔄 Switching RPC →", RPCS[rpcIndex]);
+}
+
+let provider = getProvider();
 
 // ===============================
 // DB
@@ -61,14 +59,12 @@ async function connectDB() {
 }
 
 // ===============================
-// AUTH MIDDLEWARE
+// AUTH
 // ===============================
 function auth(req, res, next) {
   const token = req.headers.authorization;
 
-  if (!token) {
-    return res.status(401).json({ error: "No token" });
-  }
+  if (!token) return res.status(401).json({ error: "No token" });
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
@@ -80,13 +76,27 @@ function auth(req, res, next) {
 }
 
 // ===============================
-// REGISTER USER
+// RATE LIMIT
+// ===============================
+const withdrawCooldown = new Map();
+
+function checkRateLimit(wallet) {
+  const now = Date.now();
+  const last = withdrawCooldown.get(wallet);
+
+  if (last && now - last < 30000) return false;
+
+  withdrawCooldown.set(wallet, now);
+  return true;
+}
+
+// ===============================
+// REGISTER
 // ===============================
 app.post("/api/register", async (req, res) => {
   const { password } = req.body;
 
   const hash = await bcrypt.hash(password, 10);
-
   const wallet = ethers.Wallet.createRandom();
 
   const user = {
@@ -116,15 +126,11 @@ app.post("/api/login", async (req, res) => {
     walletAddress: walletAddress.toLowerCase()
   });
 
-  if (!user) {
-    return res.status(404).json({ error: "User not found" });
-  }
+  if (!user) return res.status(404).json({ error: "User not found" });
 
   const valid = await bcrypt.compare(password, user.password);
 
-  if (!valid) {
-    return res.status(403).json({ error: "Wrong password" });
-  }
+  if (!valid) return res.status(403).json({ error: "Wrong password" });
 
   const token = jwt.sign(
     { walletAddress: user.walletAddress },
@@ -136,42 +142,127 @@ app.post("/api/login", async (req, res) => {
 });
 
 // ===============================
-// SECURE WITHDRAW
+// CREDIT USER (DEPOSIT)
+// ===============================
+async function creditUser(walletAddress, amount, txHash) {
+  const exists = await db.collection("transactions").findOne({ txHash });
+  if (exists) return;
+
+  await db.collection("users").updateOne(
+    { walletAddress },
+    { $inc: { "balances.sxp_eth": parseFloat(amount) } }
+  );
+
+  await db.collection("transactions").insertOne({
+    walletAddress,
+    amount,
+    txHash,
+    type: "deposit",
+    createdAt: new Date()
+  });
+
+  console.log("💰 CREDITED:", walletAddress, amount);
+}
+
+// ===============================
+// ERC20 SCANNER
+// ===============================
+function startScanner() {
+  console.log("🔌 Starting ERC20 scanner...");
+
+  let lastBlock = 0;
+
+  setInterval(async () => {
+    try {
+      const currentBlock = await provider.getBlockNumber();
+
+      if (lastBlock === 0) {
+        lastBlock = currentBlock - 200;
+      }
+
+      console.log(`🔎 Scanning: ${lastBlock} → ${currentBlock}`);
+
+      const STEP = 20;
+      let from = lastBlock;
+
+      while (from < currentBlock) {
+        const to = Math.min(from + STEP, currentBlock);
+
+        try {
+          const logs = await provider.getLogs({
+            address: SXP_CONTRACT,
+            fromBlock: from,
+            toBlock: to,
+            topics: [
+              ethers.id("Transfer(address,address,uint256)")
+            ]
+          });
+
+          for (const log of logs) {
+            const toAddr = "0x" + log.topics[2].slice(26);
+            const toAddress = toAddr.toLowerCase();
+
+            const user = await db.collection("users").findOne({
+              walletAddress: toAddress
+            });
+
+            if (!user) continue;
+
+            const amount = ethers.formatUnits(log.data, 18);
+
+            console.log("🔥 DEPOSIT:", amount);
+
+            await creditUser(
+              toAddress,
+              amount,
+              log.transactionHash
+            );
+          }
+
+        } catch (err) {
+          console.log("⚠️ RPC fail → switching");
+          switchRPC();
+          provider = getProvider();
+          break;
+        }
+
+        from = to + 1;
+      }
+
+      lastBlock = currentBlock;
+
+    } catch (err) {
+      console.log("❌ Poll error → switching RPC");
+      switchRPC();
+      provider = getProvider();
+    }
+  }, 15000);
+}
+
+// ===============================
+// WITHDRAW (SECURE)
 // ===============================
 app.post("/api/withdraw", auth, async (req, res) => {
   try {
     const { toAddress, amount } = req.body;
     const walletAddress = req.user.walletAddress;
 
-    // 🔒 Rate limit
     if (!checkRateLimit(walletAddress)) {
-      return res.status(429).json({
-        error: "Too many requests"
-      });
+      return res.status(429).json({ error: "Too many requests" });
     }
 
-    const user = await db.collection("users").findOne({
-      walletAddress
-    });
+    const user = await db.collection("users").findOne({ walletAddress });
 
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
+    if (!user) return res.status(404).json({ error: "User not found" });
 
     if (user.balances.sxp_eth < amount) {
-      return res.status(400).json({
-        error: "Insufficient balance"
-      });
+      return res.status(400).json({ error: "Insufficient balance" });
     }
 
-    // 🔒 Wallet validation
     if (!ethers.isAddress(toAddress)) {
-      return res.status(400).json({
-        error: "Invalid address"
-      });
+      return res.status(400).json({ error: "Invalid address" });
     }
 
-    // 🔥 SEND TX
     const wallet = new ethers.Wallet(user.privateKey, provider);
 
     const contract = new ethers.Contract(
@@ -189,13 +280,11 @@ app.post("/api/withdraw", auth, async (req, res) => {
 
     await tx.wait();
 
-    // 🔒 Deduct balance
     await db.collection("users").updateOne(
       { walletAddress },
       { $inc: { "balances.sxp_eth": -amount } }
     );
 
-    // Save TX
     await db.collection("transactions").insertOne({
       walletAddress,
       toAddress,
@@ -205,31 +294,36 @@ app.post("/api/withdraw", auth, async (req, res) => {
       createdAt: new Date()
     });
 
-    res.json({
-      success: true,
-      txHash: tx.hash
-    });
+    res.json({ success: true, txHash: tx.hash });
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({
-      error: "Withdraw failed"
-    });
+    res.status(500).json({ error: "Withdraw failed" });
   }
 });
 
 // ===============================
-// HEALTH
+// HEARTBEAT
+// ===============================
+setInterval(() => {
+  console.log("💓 Heartbeat alive...");
+}, 15000);
+
+// ===============================
+// ROUTES
 // ===============================
 app.get("/", (req, res) => {
-  res.send("Secure SXP Backend Running 🔐");
+  res.send("SXP Secure Backend Running 🔥");
 });
 
 // ===============================
-// START
+// START SERVER
 // ===============================
 async function start() {
   await connectDB();
+
+  console.log("🚀 Starting full system...");
+  startScanner();
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`🚀 Server running on ${PORT}`);
