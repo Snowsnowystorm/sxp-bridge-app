@@ -116,13 +116,25 @@ async function creditUser(walletAddress, amount, txHash) {
 }
 
 // ===============================
-// 🔥 WEBSOCKET LISTENER (WORKING VERSION)
+// 🔥 STABLE WEBSOCKET LISTENER
 // ===============================
+let ws = null;
+let reconnectDelay = 5000;
+
 function startDepositListener() {
-  const ws = new WebSocket(process.env.ALCHEMY_WS);
+  if (ws) {
+    console.log("⚠️ WebSocket already running");
+    return;
+  }
+
+  console.log("🔌 Connecting to Alchemy...");
+
+  ws = new WebSocket(process.env.ALCHEMY_WS);
 
   ws.on("open", () => {
     console.log("🚀 Connected to Alchemy WebSocket");
+
+    reconnectDelay = 5000;
 
     ws.send(JSON.stringify({
       jsonrpc: "2.0",
@@ -141,12 +153,10 @@ function startDepositListener() {
   ws.on("message", async (data) => {
     try {
       const msg = JSON.parse(data);
-
       if (!msg.params) return;
 
       const tx = msg.params.result.transaction;
       const to = tx.to?.toLowerCase();
-
       if (!to) return;
 
       const user = await db.collection("users").findOne({
@@ -155,12 +165,7 @@ function startDepositListener() {
 
       if (!user) return;
 
-      console.log("🔥 DEPOSIT DETECTED", {
-        from: tx.from,
-        to,
-        value: tx.value,
-        hash: tx.hash
-      });
+      console.log("🔥 DEPOSIT DETECTED");
 
       await creditUser(
         to,
@@ -174,12 +179,18 @@ function startDepositListener() {
   });
 
   ws.on("error", (err) => {
-    console.error("❌ WebSocket error:", err);
+    console.error("❌ WS error:", err.message);
   });
 
   ws.on("close", () => {
-    console.log("⚠️ WebSocket closed — reconnecting...");
-    setTimeout(startDepositListener, 5000);
+    console.log(`⚠️ WS closed. Reconnecting in ${reconnectDelay / 1000}s...`);
+
+    ws = null;
+
+    setTimeout(() => {
+      reconnectDelay = Math.min(reconnectDelay * 2, 60000);
+      startDepositListener();
+    }, reconnectDelay);
   });
 }
 
