@@ -12,13 +12,49 @@ app.use(express.json());
 mongoose.connect(process.env.DATABASE_URL);
 console.log("✅ DB connected");
 
-/* ================= ENV VALIDATION ================= */
-if (!process.env.PRIVATE_KEY || !process.env.PRIVATE_KEY.startsWith("0x") || process.env.PRIVATE_KEY.length !== 66) {
-  throw new Error("❌ INVALID PRIVATE KEY IN .env (must be 0x + 64 hex chars)");
+/* ================= DEBUG ENV ================= */
+console.log("🔑 RAW PRIVATE KEY:", process.env.PRIVATE_KEY);
+console.log("🔑 LENGTH:", process.env.PRIVATE_KEY?.length);
+
+const PRIVATE_KEY = (process.env.PRIVATE_KEY || "").trim();
+
+/* ================= PROVIDERS ================= */
+const providerPrimary = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
+const providerFallback = new ethers.JsonRpcProvider(process.env.ETH_FALLBACK_RPC);
+
+let provider = providerPrimary;
+
+function switchProvider() {
+  console.log("🔄 Switching RPC...");
+  provider = provider === providerPrimary ? providerFallback : providerPrimary;
 }
 
-if (!process.env.SXP_CONTRACT) {
-  throw new Error("❌ Missing SXP_CONTRACT in .env");
+/* ================= SAFE WALLET INIT ================= */
+let wallet;
+
+try {
+  if (!PRIVATE_KEY.startsWith("0x") || PRIVATE_KEY.length !== 66) {
+    console.log("❌ INVALID PRIVATE KEY FORMAT — SERVER WILL STILL RUN (NO WITHDRAW)");
+  } else {
+    wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+    console.log("🔥 Hot Wallet:", wallet.address);
+  }
+} catch (err) {
+  console.log("❌ Wallet init failed:", err.message);
+}
+
+/* ================= CONTRACT ================= */
+let contract;
+
+if (wallet) {
+  contract = new ethers.Contract(
+    process.env.SXP_CONTRACT,
+    [
+      "event Transfer(address indexed from, address indexed to, uint amount)",
+      "function transfer(address to, uint amount) returns (bool)"
+    ],
+    wallet
+  );
 }
 
 /* ================= MODELS ================= */
@@ -42,31 +78,6 @@ const txSchema = new mongoose.Schema({
 });
 
 const Tx = mongoose.model("Tx", txSchema);
-
-/* ================= PROVIDERS ================= */
-const providerPrimary = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
-const providerFallback = new ethers.JsonRpcProvider(process.env.ETH_FALLBACK_RPC);
-
-let provider = providerPrimary;
-
-function switchProvider() {
-  console.log("🔄 Switching RPC...");
-  provider = provider === providerPrimary ? providerFallback : providerPrimary;
-}
-
-/* ================= HOT WALLET ================= */
-const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
-console.log("🔥 Hot Wallet:", wallet.address);
-
-/* ================= CONTRACT ================= */
-const contract = new ethers.Contract(
-  process.env.SXP_CONTRACT,
-  [
-    "event Transfer(address indexed from, address indexed to, uint amount)",
-    "function transfer(address to, uint amount) returns (bool)"
-  ],
-  wallet
-);
 
 /* ================= SCANNER ================= */
 let lastBlock = 0;
@@ -130,6 +141,10 @@ async function scanDeposits() {
 /* ================= WITHDRAW ================= */
 app.post("/withdraw", async (req, res) => {
   try {
+    if (!wallet) {
+      return res.status(500).json({ error: "Wallet not configured" });
+    }
+
     const { walletAddress, toAddress, amount } = req.body;
 
     if (!ethers.isAddress(toAddress)) {
@@ -143,11 +158,8 @@ app.post("/withdraw", async (req, res) => {
       return res.status(400).json({ error: "Insufficient balance" });
     }
 
-    // 🔒 deduct first
     user.balances.sxp_eth -= amount;
     await user.save();
-
-    console.log("🚀 Sending withdraw →", toAddress);
 
     const tx = await contract.transfer(
       toAddress,
@@ -177,10 +189,6 @@ app.post("/bridge/solar", async (req, res) => {
   try {
     const { walletAddress, solarAddress, amount } = req.body;
 
-    if (!solarAddress || !solarAddress.startsWith("S")) {
-      return res.status(400).json({ error: "Invalid Solar address" });
-    }
-
     const user = await User.findOne({ walletAddress });
     if (!user) return res.status(404).json({ error: "User not found" });
 
@@ -201,12 +209,9 @@ app.post("/bridge/solar", async (req, res) => {
       chain: "SOLAR"
     });
 
-    console.log("🌉 Bridge queued →", solarAddress, amount);
+    console.log("🌉 Bridge queued:", amount);
 
-    res.json({
-      success: true,
-      message: "Bridge queued (awaiting Solar payout)"
-    });
+    res.json({ success: true });
 
   } catch (err) {
     console.log("❌ Bridge error:", err.message);
