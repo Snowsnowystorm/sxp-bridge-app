@@ -11,6 +11,19 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
+/* ================= DEBUG ROUTES ================= */
+app.get("/", (req, res) => {
+  res.send("API LIVE ✅");
+});
+
+app.get("/withdraw", (req, res) => {
+  res.send("Withdraw route exists ✅");
+});
+
+app.get("/bridge/solar", (req, res) => {
+  res.send("Solar route exists ✅");
+});
+
 /* ================= DATABASE ================= */
 mongoose.connect(process.env.DATABASE_URL);
 console.log("✅ DB connected");
