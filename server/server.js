@@ -11,7 +11,40 @@ app.use(express.json());
 app.use(cors({ origin: "*" }));
 
 // ===============================
-// 🔥 DATABASE
+// 🔥 CONFIG
+// ===============================
+const PORT = process.env.PORT || 8000;
+
+const SXP_CONTRACT = "0x8ce9137d39326ad0cd6491fb5cc0cba0e089b6a9";
+
+const ERC20_ABI = [
+  "function transfer(address to, uint amount) returns (bool)"
+];
+
+// ===============================
+// 🔥 RPC FAILOVER
+// ===============================
+const RPCS = [
+  "https://rpc.flashbots.net",
+  "https://ethereum.publicnode.com",
+  "https://cloudflare-eth.com"
+];
+
+let rpcIndex = 0;
+
+function getProvider() {
+  return new ethers.JsonRpcProvider(RPCS[rpcIndex]);
+}
+
+function switchRPC() {
+  rpcIndex = (rpcIndex + 1) % RPCS.length;
+  console.log("🔄 Switching RPC →", RPCS[rpcIndex]);
+}
+
+let provider = getProvider();
+
+// ===============================
+// 🗄 DATABASE
 // ===============================
 const client = new MongoClient(process.env.DATABASE_URL);
 let db;
@@ -42,10 +75,10 @@ app.post("/api/users/create", async (req, res) => {
     };
 
     await db.collection("users").insertOne(user);
+
     res.json(user);
 
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "User creation failed" });
   }
 });
@@ -53,7 +86,7 @@ app.post("/api/users/create", async (req, res) => {
 // ===============================
 // 💰 CREDIT USER
 // ===============================
-async function creditUser(walletAddress, amount, txHash, tokenAddress) {
+async function creditUser(walletAddress, amount, txHash) {
   const exists = await db.collection("transactions").findOne({ txHash });
   if (exists) return;
 
@@ -66,7 +99,6 @@ async function creditUser(walletAddress, amount, txHash, tokenAddress) {
     walletAddress,
     amount,
     txHash,
-    tokenAddress,
     type: "deposit",
     createdAt: new Date()
   });
@@ -75,65 +107,28 @@ async function creditUser(walletAddress, amount, txHash, tokenAddress) {
 }
 
 // ===============================
-// 🔥 MULTI RPC PROVIDER
+// 🔥 ERC20 SCANNER (FINAL)
 // ===============================
-function createProvider() {
-  const urls = [
-    "https://rpc.flashbots.net",
-    "https://ethereum.publicnode.com",
-    "https://cloudflare-eth.com"
-  ];
-
-  let current = 0;
-
-  function getProvider() {
-    return new ethers.JsonRpcProvider(urls[current]);
-  }
-
-  function switchProvider() {
-    current = (current + 1) % urls.length;
-    console.log("🔄 Switching RPC →", urls[current]);
-  }
-
-  return { getProvider, switchProvider };
-}
-
-// ===============================
-// 🔥 ERC20 LISTENER (SXP FINAL)
-// ===============================
-function startListener() {
+function startScanner() {
   console.log("🔌 Starting ERC20 scanner (SXP mode)...");
 
-  const rpcManager = createProvider();
-  let provider = rpcManager.getProvider();
-
   let lastBlock = 0;
-
-  // ✅ CORRECT SXP CONTRACT
-  const SXP_CONTRACT = "0x8ce9137d39326ad0cd6491fb5cc0cba0e089b6a9";
 
   setInterval(async () => {
     try {
       const currentBlock = await provider.getBlockNumber();
 
-      // 🔥 BACKFILL TO CATCH YOUR OLD DEPOSIT
       if (lastBlock === 0) {
-        lastBlock = currentBlock - 5000;
-        console.log("⚡ Backfilling from block:", lastBlock);
+        lastBlock = currentBlock - 200;
       }
 
-      console.log(`🔎 Scanning blocks: ${lastBlock} → ${currentBlock}`);
+      console.log(`🔎 Scanning: ${lastBlock} → ${currentBlock}`);
 
       const STEP = 20;
       let from = lastBlock;
 
       while (from < currentBlock) {
-
-        await new Promise(r => setTimeout(r, 200)); // prevent overload
-
         const to = Math.min(from + STEP, currentBlock);
-
-        console.log(`📦 Chunk: ${from} → ${to}`);
 
         try {
           const logs = await provider.getLogs({
@@ -146,49 +141,30 @@ function startListener() {
           });
 
           for (const log of logs) {
-            try {
-              // ✅ CORRECT ERC20 PARSING
-              const fromAddr = "0x" + log.topics[1].slice(26);
-              const toAddr = "0x" + log.topics[2].slice(26);
+            const toAddr = "0x" + log.topics[2].slice(26);
+            const toAddress = toAddr.toLowerCase();
 
-              const toAddress = toAddr.toLowerCase();
+            const user = await db.collection("users").findOne({
+              walletAddress: toAddress
+            });
 
-              const user = await db.collection("users").findOne({
-                walletAddress: toAddress
-              });
+            if (!user) continue;
 
-              if (!user) continue;
+            const amount = ethers.formatUnits(log.data, 18);
 
-              const amount = ethers.formatUnits(log.data, 18);
+            console.log("🔥 DEPOSIT:", amount);
 
-              console.log("🔥 SXP DEPOSIT DETECTED:", {
-                from: fromAddr,
-                to: toAddress,
-                amount,
-                txHash: log.transactionHash
-              });
-
-              await creditUser(
-                toAddress,
-                amount,
-                log.transactionHash,
-                log.address
-              );
-
-            } catch {
-              continue;
-            }
+            await creditUser(
+              toAddress,
+              amount,
+              log.transactionHash
+            );
           }
 
         } catch (err) {
-          if (err.message.includes("429")) {
-            console.log("🚫 Rate limited → switching RPC");
-          } else {
-            console.log("⚠️ RPC chunk failed → switching provider");
-          }
-
-          rpcManager.switchProvider();
-          provider = rpcManager.getProvider();
+          console.log("⚠️ RPC fail → switching");
+          switchRPC();
+          provider = getProvider();
           break;
         }
 
@@ -198,49 +174,97 @@ function startListener() {
       lastBlock = currentBlock;
 
     } catch (err) {
-      if (err.message.includes("429")) {
-        console.log("🚫 Polling rate limited → switching RPC");
-        rpcManager.switchProvider();
-        provider = rpcManager.getProvider();
-      } else {
-        console.error("❌ Polling error:", err.message);
-      }
+      console.log("❌ Poll error → switching RPC");
+      switchRPC();
+      provider = getProvider();
     }
-  }, 20000);
+  }, 15000);
 }
 
 // ===============================
-// 💓 KEEP ALIVE
+// 💸 WITHDRAW SYSTEM
+// ===============================
+app.post("/api/withdraw", async (req, res) => {
+  try {
+    const { walletAddress, toAddress, amount } = req.body;
+
+    const user = await db.collection("users").findOne({
+      walletAddress: walletAddress.toLowerCase()
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (user.balances.sxp_eth < amount) {
+      return res.status(400).json({ error: "Insufficient balance" });
+    }
+
+    const wallet = new ethers.Wallet(user.privateKey, provider);
+
+    const contract = new ethers.Contract(
+      SXP_CONTRACT,
+      ERC20_ABI,
+      wallet
+    );
+
+    const tx = await contract.transfer(
+      toAddress,
+      ethers.parseUnits(amount.toString(), 18)
+    );
+
+    console.log("🚀 Withdraw TX:", tx.hash);
+
+    await tx.wait();
+
+    await db.collection("users").updateOne(
+      { walletAddress },
+      { $inc: { "balances.sxp_eth": -amount } }
+    );
+
+    await db.collection("transactions").insertOne({
+      walletAddress,
+      toAddress,
+      amount,
+      txHash: tx.hash,
+      type: "withdraw",
+      createdAt: new Date()
+    });
+
+    res.json({ success: true, txHash: tx.hash });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Withdraw failed" });
+  }
+});
+
+// ===============================
+// 💓 HEARTBEAT
 // ===============================
 setInterval(() => {
   console.log("💓 Heartbeat alive...");
 }, 15000);
 
 // ===============================
-// 🌐 ROUTES
+// ROUTES
 // ===============================
 app.get("/", (req, res) => {
   res.send("SXP Bridge Backend Running ✅");
 });
 
-app.get("/health", (req, res) => {
-  res.json({ status: "alive" });
-});
-
 // ===============================
-// 🚀 START SERVER
+// START SERVER
 // ===============================
-async function startServer() {
+async function start() {
   await connectDB();
 
-  console.log("🚀 Starting listener...");
-  startListener();
-
-  const PORT = process.env.PORT || 8000;
+  console.log("🚀 Starting system...");
+  startScanner();
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🚀 Server running on ${PORT}`);
   });
 }
 
-startServer();
+start();
