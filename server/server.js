@@ -46,6 +46,7 @@ app.post("/api/users/create", async (req, res) => {
     res.json(user);
 
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "User creation failed" });
   }
 });
@@ -58,7 +59,7 @@ async function creditUser(walletAddress, amount, txHash) {
   if (exists) return;
 
   await db.collection("users").updateOne(
-    { walletAddress: walletAddress.toLowerCase() },
+    { walletAddress },
     { $inc: { "balances.sxp_eth": parseFloat(amount) } }
   );
 
@@ -75,55 +76,56 @@ async function creditUser(walletAddress, amount, txHash) {
 }
 
 // ===============================
-// 🔥 SXP ERC20 LISTENER
+// 🔥 SXP LISTENER (ETHERS v6 SAFE)
 // ===============================
 function startListener() {
-  const provider = new ethers.WebSocketProvider(process.env.ALCHEMY_WS);
+  try {
+    console.log("🔌 Connecting to Alchemy...");
 
-  const SXP_CONTRACT = process.env.SXP_ETH_CONTRACT;
+    const provider = new ethers.WebSocketProvider(process.env.ALCHEMY_WS);
 
-  const abi = [
-    "event Transfer(address indexed from, address indexed to, uint256 value)"
-  ];
+    const abi = [
+      "event Transfer(address indexed from, address indexed to, uint256 value)"
+    ];
 
-  const contract = new ethers.Contract(SXP_CONTRACT, abi, provider);
+    const contract = new ethers.Contract(
+      process.env.SXP_ETH_CONTRACT,
+      abi,
+      provider
+    );
 
-  console.log("🚀 Listening for SXP token deposits...");
+    console.log("🚀 Listening for SXP token deposits...");
 
-  contract.on("Transfer", async (from, to, value, event) => {
-    try {
-      const toAddress = to.toLowerCase();
+    contract.on("Transfer", async (from, to, value, event) => {
+      try {
+        const toAddress = to.toLowerCase();
 
-      const user = await db.collection("users").findOne({
-        walletAddress: toAddress
-      });
+        const user = await db.collection("users").findOne({
+          walletAddress: toAddress
+        });
 
-      if (!user) return;
+        if (!user) return;
 
-      const amount = ethers.formatUnits(value, 18);
+        const amount = ethers.formatUnits(value, 18);
 
-      console.log("🔥 SXP DEPOSIT DETECTED:", {
-        from,
-        to,
-        amount,
-        tx: event.log.transactionHash
-      });
+        console.log("🔥 SXP DEPOSIT DETECTED:", {
+          from,
+          to,
+          amount,
+          tx: event.log.transactionHash
+        });
 
-      await creditUser(toAddress, amount, event.log.transactionHash);
+        await creditUser(toAddress, amount, event.log.transactionHash);
 
-    } catch (err) {
-      console.error("Listener error:", err);
-    }
-  });
+      } catch (err) {
+        console.error("Listener error:", err);
+      }
+    });
 
-  provider.on("error", (err) => {
-    console.error("❌ WS error:", err.message);
-  });
-
-  provider.on("close", () => {
-    console.log("⚠️ WS closed — reconnecting in 5s...");
+  } catch (err) {
+    console.error("❌ Listener crashed, retrying in 5s...", err);
     setTimeout(startListener, 5000);
-  });
+  }
 }
 
 // ===============================
