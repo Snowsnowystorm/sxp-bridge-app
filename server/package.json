@@ -1,7 +1,7 @@
 {
   "name": "sxp-bridge-backend",
   "version": "1.0.0",
-  "description": "SXP Bridge Backend (ETH + Solar Ready)",
+  "description": "SXP Bridge Backend",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -11,6 +11,6 @@
     "dotenv": "^16.4.5",
     "ethers": "^6.11.1",
     "express": "^4.18.2",
-    "mongoose": "^8.3.2",
+    "mongoose": "^8.3.2"
   }
 }
