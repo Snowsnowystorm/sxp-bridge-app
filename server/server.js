@@ -18,12 +18,7 @@ process.on("unhandledRejection", (err) => {
 });
 
 /* ================= DEBUG ================= */
-console.log("🔥 REAL BALANCE SERVER RUNNING");
-
-/* ================= ROUTES ================= */
-app.get("/", (req, res) => {
-  res.send("API LIVE ✅");
-});
+console.log("🔥 DEBUG SERVER RUNNING");
 
 /* ================= DATABASE ================= */
 mongoose
@@ -40,7 +35,10 @@ const User = mongoose.model(
 );
 
 /* ================= ETH SETUP ================= */
-const provider = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL);
+const RPC_URL = process.env.ETH_RPC_URL;
+console.log("🌐 RPC URL:", RPC_URL);
+
+const provider = new ethers.JsonRpcProvider(RPC_URL);
 
 let wallet = null;
 
@@ -56,6 +54,32 @@ try {
 } catch (err) {
   console.log("❌ Wallet error:", err.message);
 }
+
+/* ================= ROUTES ================= */
+
+app.get("/", (req, res) => {
+  res.send("API LIVE ✅");
+});
+
+/* ================= DEBUG BALANCE ================= */
+app.get("/debug-balance", async (req, res) => {
+  try {
+    if (!wallet) {
+      return res.json({ error: "Wallet not initialized" });
+    }
+
+    const balance = await provider.getBalance(wallet.address);
+
+    res.json({
+      address: wallet.address,
+      balanceRaw: balance.toString(),
+      balanceETH: ethers.formatEther(balance),
+      rpc: RPC_URL
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
 
 /* ================= CREATE USER ================= */
 app.post("/create-user", async (req, res) => {
@@ -74,7 +98,7 @@ app.post("/create-user", async (req, res) => {
   }
 });
 
-/* ================= WITHDRAW (REAL BALANCE) ================= */
+/* ================= WITHDRAW ================= */
 app.post("/withdraw", async (req, res) => {
   console.log("🔥 POST /withdraw HIT");
   console.log("📦 BODY:", req.body);
@@ -99,7 +123,6 @@ app.post("/withdraw", async (req, res) => {
       });
     }
 
-    // 🔥 REAL BALANCE CHECK
     const balance = await provider.getBalance(wallet.address);
 
     console.log("💰 REAL WALLET BALANCE:", ethers.formatEther(balance));
@@ -111,7 +134,6 @@ app.post("/withdraw", async (req, res) => {
       });
     }
 
-    // 🚀 SEND REAL TX
     const tx = await wallet.sendTransaction({
       to: toAddress,
       value: ethers.parseEther(amount.toString()),
@@ -120,7 +142,7 @@ app.post("/withdraw", async (req, res) => {
 
     console.log("⏳ TX SENT:", tx.hash);
 
-    return res.json({
+    res.json({
       success: true,
       txHash: tx.hash
     });
@@ -128,7 +150,7 @@ app.post("/withdraw", async (req, res) => {
   } catch (err) {
     console.log("❌ WITHDRAW ERROR:", err);
 
-    return res.status(200).json({
+    res.status(200).json({
       success: false,
       error: err.message
     });
