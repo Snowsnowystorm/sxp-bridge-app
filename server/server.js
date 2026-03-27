@@ -8,7 +8,7 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-console.log("🔥 STABLE SERVER BOOTING");
+console.log("🔥 HARD-STABLE SERVER START");
 
 /* ================= DATABASE ================= */
 mongoose
@@ -24,50 +24,38 @@ const User = mongoose.model(
   })
 );
 
-/* ================= RPC LIST ================= */
-const RPCS = [
-  "https://eth.llamarpc.com",
-  "https://rpc.ankr.com/eth",
-  "https://cloudflare-eth.com"
-];
+/* ================= STATIC PROVIDER (NO DETECTION) ================= */
 
-let provider = null;
+/*
+⚠️ CRITICAL:
+We bypass ALL network detection here
+*/
+
+const provider = new ethers.StaticJsonRpcProvider(
+  "https://eth.llamarpc.com",
+  {
+    name: "mainnet",
+    chainId: 1
+  }
+);
+
+console.log("🌐 STATIC RPC SET");
+
+/* ================= WALLET ================= */
 let wallet = null;
 
-/* ================= INIT PROVIDER SAFELY ================= */
-async function initProvider() {
-  for (let url of RPCS) {
-    try {
-      const p = new ethers.JsonRpcProvider(url, {
-        name: "mainnet",
-        chainId: 1
-      });
+try {
+  const PRIVATE_KEY = (process.env.PRIVATE_KEY || "").trim();
 
-      await p.getBlockNumber();
-
-      console.log("✅ USING RPC:", url);
-
-      provider = p;
-
-      const PRIVATE_KEY = (process.env.PRIVATE_KEY || "").trim();
-
-      if (PRIVATE_KEY.startsWith("0x") && PRIVATE_KEY.length === 66) {
-        wallet = new ethers.Wallet(PRIVATE_KEY, provider);
-        console.log("🔥 Hot Wallet:", wallet.address);
-      }
-
-      return;
-
-    } catch (err) {
-      console.log("❌ RPC FAILED:", url);
-    }
+  if (PRIVATE_KEY.startsWith("0x") && PRIVATE_KEY.length === 66) {
+    wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+    console.log("🔥 Hot Wallet:", wallet.address);
+  } else {
+    console.log("⚠️ Invalid PRIVATE_KEY");
   }
-
-  console.log("❌ NO RPC AVAILABLE (server still running)");
+} catch (err) {
+  console.log("❌ Wallet error:", err.message);
 }
-
-/* RUN INIT IN BACKGROUND */
-initProvider();
 
 /* ================= ROUTES ================= */
 
@@ -75,20 +63,15 @@ app.get("/", (req, res) => {
   res.send("API LIVE ✅");
 });
 
-/* ================= DEBUG ================= */
+/* ================= DEBUG BALANCE ================= */
 app.get("/debug-balance", async (req, res) => {
   try {
-    if (!provider || !wallet) {
-      return res.json({ error: "Provider not ready yet" });
-    }
-
     const balance = await provider.getBalance(wallet.address);
 
     res.json({
       address: wallet.address,
       balanceETH: ethers.formatEther(balance)
     });
-
   } catch (err) {
     res.json({ error: err.message });
   }
@@ -112,13 +95,6 @@ app.post("/withdraw", async (req, res) => {
   console.log("🔥 WITHDRAW HIT", req.body);
 
   try {
-    if (!provider || !wallet) {
-      return res.json({
-        success: false,
-        error: "Provider not ready"
-      });
-    }
-
     const { walletAddress, toAddress, amount } = req.body;
 
     const user = await User.findOne({ walletAddress });
@@ -143,6 +119,8 @@ app.post("/withdraw", async (req, res) => {
       value: ethers.parseEther(amount.toString()),
       gasLimit: 21000
     });
+
+    console.log("🚀 TX:", tx.hash);
 
     res.json({
       success: true,
