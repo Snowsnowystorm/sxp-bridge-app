@@ -2,89 +2,127 @@ import express from "express";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import { ethers } from "ethers";
-import fetch from "node-fetch";
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
 
-console.log("🔥 FINAL PRODUCTION SERVER START");
+/* =========================
+   🔥 ENV VARIABLES
+========================= */
 
-/* ================= DATABASE ================= */
-mongoose
-  .connect(process.env.DATABASE_URL)
+const PORT = process.env.PORT || 3000;
+const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const MONGO_URI = process.env.MONGO_URI;
+
+/* =========================
+   🔥 DATABASE
+========================= */
+
+mongoose.connect(MONGO_URI)
   .then(() => console.log("✅ DB connected"))
-  .catch((err) => console.log("❌ DB error:", err.message));
+  .catch(err => console.log("❌ DB error:", err));
 
-/* ================= USER MODEL ================= */
-const User = mongoose.model(
-  "User",
-  new mongoose.Schema({
-    walletAddress: String
-  })
-);
-
-/* ================= PROVIDER (FOR SENDING TX ONLY) ================= */
-const provider = new ethers.JsonRpcProvider(
-  "https://rpc.ankr.com/eth",
-  1
-);
-
-console.log("🌐 TX PROVIDER READY");
-
-/* ================= WALLET ================= */
-let wallet = null;
-
-try {
-  const PRIVATE_KEY = (process.env.PRIVATE_KEY || "").trim();
-
-  if (PRIVATE_KEY.startsWith("0x") && PRIVATE_KEY.length === 66) {
-    wallet = new ethers.Wallet(PRIVATE_KEY, provider);
-    console.log("🔥 Hot Wallet:", wallet.address);
-  } else {
-    console.log("⚠️ Invalid PRIVATE_KEY");
+const userSchema = new mongoose.Schema({
+  walletAddress: String,
+  balances: {
+    ETH: { type: Number, default: 0 }
   }
-} catch (err) {
-  console.log("❌ Wallet error:", err.message);
-}
-
-/* ================= ROUTES ================= */
-
-app.get("/", (req, res) => {
-  res.send("API LIVE ✅");
 });
 
-/* ================= ETHERSCAN BALANCE ================= */
-async function getRealBalance(address) {
-  const url = `https://api.etherscan.io/api?module=account&action=balance&address=${address}&tag=latest&apikey=${process.env.ETHERSCAN_API_KEY}`;
+const User = mongoose.model("User", userSchema);
 
-  const response = await fetch(url);
-  const data = await response.json();
+/* =========================
+   🔥 RPC (STABLE)
+========================= */
 
-  return ethers.formatEther(data.result);
+const RPC_URLS = [
+  "https://eth.llamarpc.com",
+  "https://ethereum.publicnode.com",
+  "https://rpc.flashbots.net"
+];
+
+let provider;
+
+async function initProvider() {
+  for (const url of RPC_URLS) {
+    try {
+      const testProvider = new ethers.JsonRpcProvider(url);
+      const block = await testProvider.getBlockNumber();
+      console.log(`✅ RPC WORKING: ${url} | Block: ${block}`);
+      provider = testProvider;
+      return;
+    } catch (err) {
+      console.log(`❌ FAILED RPC: ${url}`);
+    }
+  }
+
+  throw new Error("❌ NO WORKING RPC");
 }
 
-/* ================= DEBUG ================= */
-app.get("/debug-balance", async (req, res) => {
+/* =========================
+   🔥 WALLET
+========================= */
+
+let wallet;
+
+async function initWallet() {
+  if (!provider) throw new Error("Provider not ready");
+  wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+  console.log("🔥 Hot Wallet:", wallet.address);
+}
+
+/* =========================
+   🚀 START SERVER
+========================= */
+
+async function startServer() {
   try {
-    if (!wallet) {
-      return res.json({ error: "Wallet not initialized" });
-    }
+    console.log("🔥 HARD-STABLE SERVER START");
 
-    const balance = await getRealBalance(wallet.address);
+    await initProvider();
+    await initWallet();
 
-    res.json({
-      address: wallet.address,
-      balanceETH: balance
+    app.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
     });
 
   } catch (err) {
-    res.json({ error: err.message });
+    console.error("❌ SERVER FAILED:", err);
+    process.exit(1);
+  }
+}
+
+startServer();
+
+/* =========================
+   🧪 DEBUG BALANCE (REAL)
+========================= */
+
+app.get("/debug-balance", async (req, res) => {
+  try {
+    const balance = await provider.getBalance(wallet.address);
+    const eth = ethers.formatEther(balance);
+
+    console.log("💰 REAL BALANCE:", eth);
+
+    res.json({
+      success: true,
+      address: wallet.address,
+      balanceETH: eth
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "balance failed" });
   }
 });
 
-/* ================= CREATE USER ================= */
+/* =========================
+   👤 CREATE USER
+========================= */
+
 app.post("/create-user", async (req, res) => {
   try {
     const { walletAddress } = req.body;
@@ -98,32 +136,53 @@ app.post("/create-user", async (req, res) => {
     res.json({ success: true, user });
 
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "create user failed" });
   }
 });
 
-/* ================= WITHDRAW ================= */
-app.post("/withdraw", async (req, res) => {
-  console.log("🔥 WITHDRAW HIT", req.body);
+/* =========================
+   💰 GET USER
+========================= */
 
+app.get("/user/:wallet", async (req, res) => {
   try {
-    const { walletAddress, toAddress, amount } = req.body;
+    const user = await User.findOne({ walletAddress: req.params.wallet });
+    res.json({ success: true, user });
+  } catch (err) {
+    res.status(500).json({ error: "fetch failed" });
+  }
+});
 
-    if (!walletAddress || !toAddress || !amount) {
-      return res.json({ success: false, error: "Missing fields" });
+/* =========================
+   💸 WITHDRAW (REAL)
+========================= */
+
+app.post("/withdraw", async (req, res) => {
+  try {
+    console.log("🔥 POST /withdraw HIT");
+    console.log("📦 BODY:", req.body);
+
+    const { amount, toAddress, walletAddress } = req.body;
+
+    if (!amount || !toAddress || !walletAddress) {
+      return res.status(400).json({ error: "Missing fields" });
     }
 
     const user = await User.findOne({ walletAddress });
 
     if (!user) {
-      return res.json({ success: false, error: "User not found" });
+      return res.json({
+        success: false,
+        error: "User not found"
+      });
     }
 
-    const balance = await getRealBalance(wallet.address);
+    const balance = await provider.getBalance(wallet.address);
+    const balanceETH = parseFloat(ethers.formatEther(balance));
 
-    console.log("💰 REAL BALANCE:", balance);
+    console.log("💰 REAL WALLET BALANCE:", balanceETH);
 
-    if (parseFloat(balance) < parseFloat(amount)) {
+    if (balanceETH < amount) {
       return res.json({
         success: false,
         error: "Insufficient REAL wallet balance"
@@ -137,22 +196,19 @@ app.post("/withdraw", async (req, res) => {
 
     console.log("🚀 TX SENT:", tx.hash);
 
+    await tx.wait();
+
     res.json({
       success: true,
       txHash: tx.hash
     });
 
   } catch (err) {
-    console.log("❌ WITHDRAW ERROR:", err);
+    console.error(err);
 
     res.json({
       success: false,
       error: err.message
     });
   }
-});
-
-/* ================= START ================= */
-app.listen(process.env.PORT || 3000, () => {
-  console.log("🚀 Server running on port", process.env.PORT);
 });
