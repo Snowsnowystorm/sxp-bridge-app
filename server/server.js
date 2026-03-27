@@ -18,7 +18,7 @@ process.on("unhandledRejection", (err) => {
 });
 
 /* ================= DEBUG ================= */
-console.log("🔥 FINAL SERVER RUNNING");
+console.log("🔥 REAL BALANCE SERVER RUNNING");
 
 /* ================= ROUTES ================= */
 app.get("/", (req, res) => {
@@ -31,14 +31,11 @@ mongoose
   .then(() => console.log("✅ DB connected"))
   .catch((err) => console.log("❌ DB error:", err.message));
 
-/* ================= MODELS ================= */
+/* ================= USER MODEL ================= */
 const User = mongoose.model(
   "User",
   new mongoose.Schema({
-    walletAddress: String,
-    balances: {
-      sxp_eth: { type: Number, default: 0 }
-    }
+    walletAddress: String
   })
 );
 
@@ -54,7 +51,7 @@ try {
     wallet = new ethers.Wallet(PRIVATE_KEY, provider);
     console.log("🔥 Hot Wallet:", wallet.address);
   } else {
-    console.log("⚠️ Invalid PRIVATE_KEY — running in safe mode");
+    console.log("⚠️ Invalid PRIVATE_KEY");
   }
 } catch (err) {
   console.log("❌ Wallet error:", err.message);
@@ -68,12 +65,7 @@ app.post("/create-user", async (req, res) => {
     let user = await User.findOne({ walletAddress });
 
     if (!user) {
-      user = await User.create({
-        walletAddress,
-        balances: {
-          sxp_eth: 10
-        }
-      });
+      user = await User.create({ walletAddress });
     }
 
     res.json({ success: true, user });
@@ -82,7 +74,7 @@ app.post("/create-user", async (req, res) => {
   }
 });
 
-/* ================= WITHDRAW ================= */
+/* ================= WITHDRAW (REAL BALANCE) ================= */
 app.post("/withdraw", async (req, res) => {
   console.log("🔥 POST /withdraw HIT");
   console.log("📦 BODY:", req.body);
@@ -100,35 +92,26 @@ app.post("/withdraw", async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    if (user.balances.sxp_eth < amount) {
-      return res.status(400).json({ error: "Insufficient balance" });
-    }
-
-    // 🔒 SAFE MODE (no wallet)
     if (!wallet) {
       return res.json({
-        success: true,
-        message: "TEST MODE (no wallet)",
-        txHash: "0xTEST"
+        success: false,
+        error: "Wallet not initialized"
       });
     }
 
-    // 💰 CHECK HOT WALLET BALANCE
+    // 🔥 REAL BALANCE CHECK
     const balance = await provider.getBalance(wallet.address);
-    console.log("💰 Wallet balance:", ethers.formatEther(balance));
+
+    console.log("💰 REAL WALLET BALANCE:", ethers.formatEther(balance));
 
     if (balance < ethers.parseEther(amount.toString())) {
       return res.json({
         success: false,
-        error: "Hot wallet has no ETH for gas"
+        error: "Insufficient REAL wallet balance"
       });
     }
 
-    // deduct user balance AFTER checks
-    user.balances.sxp_eth -= amount;
-    await user.save();
-
-    // 🚀 SEND TX (SAFE)
+    // 🚀 SEND REAL TX
     const tx = await wallet.sendTransaction({
       to: toAddress,
       value: ethers.parseEther(amount.toString()),
@@ -137,14 +120,13 @@ app.post("/withdraw", async (req, res) => {
 
     console.log("⏳ TX SENT:", tx.hash);
 
-    // ⚡ DO NOT WAIT (prevents timeout crash)
-    res.json({
+    return res.json({
       success: true,
       txHash: tx.hash
     });
 
   } catch (err) {
-    console.log("❌ WITHDRAW ERROR FULL:", err);
+    console.log("❌ WITHDRAW ERROR:", err);
 
     return res.status(200).json({
       success: false,
