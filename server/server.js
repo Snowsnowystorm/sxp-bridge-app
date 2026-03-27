@@ -8,7 +8,7 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-console.log("🔥 HARD-STABLE SERVER START");
+console.log("🔥 FINAL FIX SERVER START");
 
 /* ================= DATABASE ================= */
 mongoose
@@ -24,22 +24,14 @@ const User = mongoose.model(
   })
 );
 
-/* ================= STATIC PROVIDER (NO DETECTION) ================= */
+/* ================= PROVIDER (ETHERS V6 SAFE) ================= */
 
-/*
-⚠️ CRITICAL:
-We bypass ALL network detection here
-*/
-
-const provider = new ethers.StaticJsonRpcProvider(
+const provider = new ethers.JsonRpcProvider(
   "https://eth.llamarpc.com",
-  {
-    name: "mainnet",
-    chainId: 1
-  }
+  1 // 🔥 FORCE MAINNET (NO DETECTION)
 );
 
-console.log("🌐 STATIC RPC SET");
+console.log("🌐 RPC READY");
 
 /* ================= WALLET ================= */
 let wallet = null;
@@ -72,6 +64,7 @@ app.get("/debug-balance", async (req, res) => {
       address: wallet.address,
       balanceETH: ethers.formatEther(balance)
     });
+
   } catch (err) {
     res.json({ error: err.message });
   }
@@ -116,8 +109,7 @@ app.post("/withdraw", async (req, res) => {
 
     const tx = await wallet.sendTransaction({
       to: toAddress,
-      value: ethers.parseEther(amount.toString()),
-      gasLimit: 21000
+      value: ethers.parseEther(amount.toString())
     });
 
     console.log("🚀 TX:", tx.hash);
