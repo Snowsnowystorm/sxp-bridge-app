@@ -2,13 +2,14 @@ import express from "express";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import { ethers } from "ethers";
+import fetch from "node-fetch";
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
 
-console.log("🔥 FINAL FIX SERVER START");
+console.log("🔥 FINAL PRODUCTION SERVER START");
 
 /* ================= DATABASE ================= */
 mongoose
@@ -24,14 +25,13 @@ const User = mongoose.model(
   })
 );
 
-/* ================= PROVIDER (ETHERS V6 SAFE) ================= */
-
+/* ================= PROVIDER (FOR SENDING TX ONLY) ================= */
 const provider = new ethers.JsonRpcProvider(
-  "https://eth.llamarpc.com",
-  1 // 🔥 FORCE MAINNET (NO DETECTION)
+  "https://rpc.ankr.com/eth",
+  1
 );
 
-console.log("🌐 RPC READY");
+console.log("🌐 TX PROVIDER READY");
 
 /* ================= WALLET ================= */
 let wallet = null;
@@ -55,14 +55,28 @@ app.get("/", (req, res) => {
   res.send("API LIVE ✅");
 });
 
-/* ================= DEBUG BALANCE ================= */
+/* ================= ETHERSCAN BALANCE ================= */
+async function getRealBalance(address) {
+  const url = `https://api.etherscan.io/api?module=account&action=balance&address=${address}&tag=latest&apikey=${process.env.ETHERSCAN_API_KEY}`;
+
+  const response = await fetch(url);
+  const data = await response.json();
+
+  return ethers.formatEther(data.result);
+}
+
+/* ================= DEBUG ================= */
 app.get("/debug-balance", async (req, res) => {
   try {
-    const balance = await provider.getBalance(wallet.address);
+    if (!wallet) {
+      return res.json({ error: "Wallet not initialized" });
+    }
+
+    const balance = await getRealBalance(wallet.address);
 
     res.json({
       address: wallet.address,
-      balanceETH: ethers.formatEther(balance)
+      balanceETH: balance
     });
 
   } catch (err) {
@@ -72,15 +86,20 @@ app.get("/debug-balance", async (req, res) => {
 
 /* ================= CREATE USER ================= */
 app.post("/create-user", async (req, res) => {
-  const { walletAddress } = req.body;
+  try {
+    const { walletAddress } = req.body;
 
-  let user = await User.findOne({ walletAddress });
+    let user = await User.findOne({ walletAddress });
 
-  if (!user) {
-    user = await User.create({ walletAddress });
+    if (!user) {
+      user = await User.create({ walletAddress });
+    }
+
+    res.json({ success: true, user });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  res.json({ success: true, user });
 });
 
 /* ================= WITHDRAW ================= */
@@ -90,17 +109,21 @@ app.post("/withdraw", async (req, res) => {
   try {
     const { walletAddress, toAddress, amount } = req.body;
 
+    if (!walletAddress || !toAddress || !amount) {
+      return res.json({ success: false, error: "Missing fields" });
+    }
+
     const user = await User.findOne({ walletAddress });
 
     if (!user) {
       return res.json({ success: false, error: "User not found" });
     }
 
-    const balance = await provider.getBalance(wallet.address);
+    const balance = await getRealBalance(wallet.address);
 
-    console.log("💰 BALANCE:", ethers.formatEther(balance));
+    console.log("💰 REAL BALANCE:", balance);
 
-    if (balance < ethers.parseEther(amount.toString())) {
+    if (parseFloat(balance) < parseFloat(amount)) {
       return res.json({
         success: false,
         error: "Insufficient REAL wallet balance"
@@ -112,7 +135,7 @@ app.post("/withdraw", async (req, res) => {
       value: ethers.parseEther(amount.toString())
     });
 
-    console.log("🚀 TX:", tx.hash);
+    console.log("🚀 TX SENT:", tx.hash);
 
     res.json({
       success: true,
@@ -120,7 +143,7 @@ app.post("/withdraw", async (req, res) => {
     });
 
   } catch (err) {
-    console.log("❌ ERROR:", err);
+    console.log("❌ WITHDRAW ERROR:", err);
 
     res.json({
       success: false,
@@ -131,5 +154,5 @@ app.post("/withdraw", async (req, res) => {
 
 /* ================= START ================= */
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🚀 Server running");
+  console.log("🚀 Server running on port", process.env.PORT);
 });
