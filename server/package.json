@@ -1,9 +1,8 @@
 {
   "name": "sxp-bridge-backend",
   "version": "1.0.0",
-  "description": "SXP Bridge Backend",
-  "main": "server.js",
   "type": "module",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
