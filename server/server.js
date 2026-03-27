@@ -38,20 +38,34 @@ const userSchema = new mongoose.Schema({
 const User = mongoose.model("User", userSchema);
 
 /* =========================
-   🔥 STABLE RPC (FIXED)
+   🔥 RPC (STABLE)
 ========================= */
 
-const provider = new ethers.JsonRpcProvider(
-  "https://rpc.ankr.com/eth"
-);
+let provider;
+
+try {
+  provider = new ethers.JsonRpcProvider("https://ethereum.publicnode.com");
+  console.log("✅ Provider initialized");
+} catch (err) {
+  console.log("❌ Provider failed:", err.message);
+}
 
 /* =========================
-   🔥 WALLET
+   🔥 WALLET (SAFE INIT)
 ========================= */
 
-const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+let wallet;
 
-console.log("🔥 Hot Wallet:", wallet.address);
+try {
+  if (!PRIVATE_KEY) {
+    console.log("❌ PRIVATE_KEY missing");
+  } else {
+    wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+    console.log("🔥 Hot Wallet:", wallet.address);
+  }
+} catch (err) {
+  console.log("❌ Wallet init failed:", err.message);
+}
 
 /* =========================
    🚀 SERVER START
@@ -62,15 +76,32 @@ app.listen(PORT, () => {
 });
 
 /* =========================
-   🧪 DEBUG BALANCE (REAL)
+   🧪 DEBUG BALANCE (SAFE)
 ========================= */
 
 app.get("/debug-balance", async (req, res) => {
   try {
-    const balance = await provider.getBalance(wallet.address);
-    const eth = ethers.formatEther(balance);
+    console.log("🧪 DEBUG BALANCE HIT");
 
-    console.log("💰 REAL BALANCE:", eth);
+    if (!PRIVATE_KEY) {
+      return res.json({ error: "PRIVATE_KEY missing" });
+    }
+
+    if (!wallet) {
+      return res.json({ error: "wallet not initialized" });
+    }
+
+    if (!provider) {
+      return res.json({ error: "provider not initialized" });
+    }
+
+    console.log("👉 Wallet:", wallet.address);
+
+    const balance = await provider.getBalance(wallet.address);
+
+    console.log("👉 RAW BALANCE:", balance.toString());
+
+    const eth = ethers.formatEther(balance);
 
     res.json({
       success: true,
@@ -79,8 +110,11 @@ app.get("/debug-balance", async (req, res) => {
     });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "balance failed" });
+    console.error("❌ DEBUG ERROR:", err);
+
+    res.status(500).json({
+      error: err.message
+    });
   }
 });
 
@@ -119,7 +153,7 @@ app.get("/user/:wallet", async (req, res) => {
 });
 
 /* =========================
-   💸 WITHDRAW (REAL)
+   💸 WITHDRAW (SAFE DEBUG)
 ========================= */
 
 app.post("/withdraw", async (req, res) => {
@@ -131,6 +165,10 @@ app.post("/withdraw", async (req, res) => {
 
     if (!amount || !toAddress || !walletAddress) {
       return res.status(400).json({ error: "Missing fields" });
+    }
+
+    if (!wallet) {
+      return res.json({ success: false, error: "Wallet not initialized" });
     }
 
     const user = await User.findOne({ walletAddress });
@@ -169,7 +207,7 @@ app.post("/withdraw", async (req, res) => {
     });
 
   } catch (err) {
-    console.error(err);
+    console.error("❌ WITHDRAW ERROR:", err);
 
     res.json({
       success: false,
