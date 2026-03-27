@@ -12,7 +12,7 @@ app.use(express.json());
 process.on("uncaughtException", (err) => console.log("💥 UNCAUGHT:", err));
 process.on("unhandledRejection", (err) => console.log("💥 PROMISE ERROR:", err));
 
-console.log("🔥 MULTI-RPC SERVER STARTING");
+console.log("🔥 FINAL STABLE SERVER STARTING");
 
 /* ================= DATABASE ================= */
 mongoose
@@ -28,38 +28,37 @@ const User = mongoose.model(
   })
 );
 
-/* ================= MULTI RPC SYSTEM ================= */
+/* ================= MULTI RPC (FORCED MAINNET) ================= */
 const RPCS = [
-  "https://rpc.ankr.com/eth",
-  "https://cloudflare-eth.com",
   "https://eth.llamarpc.com",
-  "https://ethereum.publicnode.com"
+  "https://rpc.ankr.com/eth",
+  "https://cloudflare-eth.com"
 ];
 
 let provider;
 
-/* AUTO FIND WORKING RPC */
 async function getWorkingProvider() {
   for (let url of RPCS) {
     try {
-      const p = new ethers.JsonRpcProvider(url);
+      const p = new ethers.JsonRpcProvider(url, {
+        name: "mainnet",
+        chainId: 1
+      });
+
       const block = await p.getBlockNumber();
 
-      console.log("✅ WORKING RPC:", url, "| Block:", block);
+      console.log("✅ USING RPC:", url, "| Block:", block);
       return p;
+
     } catch (err) {
       console.log("❌ FAILED RPC:", url);
     }
   }
-  throw new Error("No working RPC found");
+
+  throw new Error("❌ No working RPC");
 }
 
-/* INIT PROVIDER */
-async function initProvider() {
-  provider = await getWorkingProvider();
-}
-
-await initProvider();
+provider = await getWorkingProvider();
 
 /* ================= WALLET ================= */
 let wallet;
@@ -86,12 +85,17 @@ app.get("/", (req, res) => {
 /* ================= DEBUG BALANCE ================= */
 app.get("/debug-balance", async (req, res) => {
   try {
+    if (!wallet) {
+      return res.json({ error: "Wallet not initialized" });
+    }
+
     const balance = await provider.getBalance(wallet.address);
 
     res.json({
       address: wallet.address,
       balanceETH: ethers.formatEther(balance)
     });
+
   } catch (err) {
     res.json({ error: err.message });
   }
@@ -99,15 +103,20 @@ app.get("/debug-balance", async (req, res) => {
 
 /* ================= CREATE USER ================= */
 app.post("/create-user", async (req, res) => {
-  const { walletAddress } = req.body;
+  try {
+    const { walletAddress } = req.body;
 
-  let user = await User.findOne({ walletAddress });
+    let user = await User.findOne({ walletAddress });
 
-  if (!user) {
-    user = await User.create({ walletAddress });
+    if (!user) {
+      user = await User.create({ walletAddress });
+    }
+
+    res.json({ success: true, user });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  res.json({ success: true, user });
 });
 
 /* ================= WITHDRAW ================= */
@@ -117,15 +126,19 @@ app.post("/withdraw", async (req, res) => {
   try {
     const { walletAddress, toAddress, amount } = req.body;
 
+    if (!walletAddress || !toAddress || !amount) {
+      return res.json({ success: false, error: "Missing fields" });
+    }
+
     const user = await User.findOne({ walletAddress });
 
     if (!user) {
       return res.json({ success: false, error: "User not found" });
     }
 
-    let balance = await provider.getBalance(wallet.address);
+    const balance = await provider.getBalance(wallet.address);
 
-    console.log("💰 BALANCE:", ethers.formatEther(balance));
+    console.log("💰 REAL BALANCE:", ethers.formatEther(balance));
 
     if (balance < ethers.parseEther(amount.toString())) {
       return res.json({
@@ -140,7 +153,7 @@ app.post("/withdraw", async (req, res) => {
       gasLimit: 21000
     });
 
-    console.log("🚀 TX:", tx.hash);
+    console.log("🚀 TX SENT:", tx.hash);
 
     res.json({
       success: true,
@@ -148,7 +161,7 @@ app.post("/withdraw", async (req, res) => {
     });
 
   } catch (err) {
-    console.log("❌ ERROR:", err);
+    console.log("❌ WITHDRAW ERROR:", err);
 
     res.json({
       success: false,
@@ -159,5 +172,5 @@ app.post("/withdraw", async (req, res) => {
 
 /* ================= START ================= */
 app.listen(process.env.PORT || 3000, () => {
-  console.log("🚀 Server running");
+  console.log("🚀 Server running on port", process.env.PORT);
 });
