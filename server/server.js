@@ -9,16 +9,10 @@ const app = express();
 app.use(express.json());
 
 /* ================= SAFETY ================= */
-process.on("uncaughtException", (err) => {
-  console.log("💥 UNCAUGHT:", err);
-});
+process.on("uncaughtException", (err) => console.log("💥 UNCAUGHT:", err));
+process.on("unhandledRejection", (err) => console.log("💥 PROMISE ERROR:", err));
 
-process.on("unhandledRejection", (err) => {
-  console.log("💥 PROMISE ERROR:", err);
-});
-
-/* ================= DEBUG ================= */
-console.log("🔥 DEBUG SERVER RUNNING");
+console.log("🔥 MULTI-RPC SERVER STARTING");
 
 /* ================= DATABASE ================= */
 mongoose
@@ -34,13 +28,41 @@ const User = mongoose.model(
   })
 );
 
-/* ================= ETH SETUP ================= */
-const RPC_URL = process.env.ETH_RPC_URL;
-console.log("🌐 RPC URL:", RPC_URL);
+/* ================= MULTI RPC SYSTEM ================= */
+const RPCS = [
+  "https://rpc.ankr.com/eth",
+  "https://cloudflare-eth.com",
+  "https://eth.llamarpc.com",
+  "https://ethereum.publicnode.com"
+];
 
-const provider = new ethers.JsonRpcProvider(RPC_URL);
+let provider;
 
-let wallet = null;
+/* AUTO FIND WORKING RPC */
+async function getWorkingProvider() {
+  for (let url of RPCS) {
+    try {
+      const p = new ethers.JsonRpcProvider(url);
+      const block = await p.getBlockNumber();
+
+      console.log("✅ WORKING RPC:", url, "| Block:", block);
+      return p;
+    } catch (err) {
+      console.log("❌ FAILED RPC:", url);
+    }
+  }
+  throw new Error("No working RPC found");
+}
+
+/* INIT PROVIDER */
+async function initProvider() {
+  provider = await getWorkingProvider();
+}
+
+await initProvider();
+
+/* ================= WALLET ================= */
+let wallet;
 
 try {
   const PRIVATE_KEY = (process.env.PRIVATE_KEY || "").trim();
@@ -64,17 +86,11 @@ app.get("/", (req, res) => {
 /* ================= DEBUG BALANCE ================= */
 app.get("/debug-balance", async (req, res) => {
   try {
-    if (!wallet) {
-      return res.json({ error: "Wallet not initialized" });
-    }
-
     const balance = await provider.getBalance(wallet.address);
 
     res.json({
       address: wallet.address,
-      balanceRaw: balance.toString(),
-      balanceETH: ethers.formatEther(balance),
-      rpc: RPC_URL
+      balanceETH: ethers.formatEther(balance)
     });
   } catch (err) {
     res.json({ error: err.message });
@@ -83,49 +99,33 @@ app.get("/debug-balance", async (req, res) => {
 
 /* ================= CREATE USER ================= */
 app.post("/create-user", async (req, res) => {
-  try {
-    const { walletAddress } = req.body;
+  const { walletAddress } = req.body;
 
-    let user = await User.findOne({ walletAddress });
+  let user = await User.findOne({ walletAddress });
 
-    if (!user) {
-      user = await User.create({ walletAddress });
-    }
-
-    res.json({ success: true, user });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  if (!user) {
+    user = await User.create({ walletAddress });
   }
+
+  res.json({ success: true, user });
 });
 
 /* ================= WITHDRAW ================= */
 app.post("/withdraw", async (req, res) => {
-  console.log("🔥 POST /withdraw HIT");
-  console.log("📦 BODY:", req.body);
+  console.log("🔥 WITHDRAW HIT", req.body);
 
   try {
     const { walletAddress, toAddress, amount } = req.body;
 
-    if (!walletAddress || !toAddress || !amount) {
-      return res.status(400).json({ error: "Missing fields" });
-    }
-
     const user = await User.findOne({ walletAddress });
 
     if (!user) {
-      return res.status(404).json({ error: "User not found" });
+      return res.json({ success: false, error: "User not found" });
     }
 
-    if (!wallet) {
-      return res.json({
-        success: false,
-        error: "Wallet not initialized"
-      });
-    }
+    let balance = await provider.getBalance(wallet.address);
 
-    const balance = await provider.getBalance(wallet.address);
-
-    console.log("💰 REAL WALLET BALANCE:", ethers.formatEther(balance));
+    console.log("💰 BALANCE:", ethers.formatEther(balance));
 
     if (balance < ethers.parseEther(amount.toString())) {
       return res.json({
@@ -140,7 +140,7 @@ app.post("/withdraw", async (req, res) => {
       gasLimit: 21000
     });
 
-    console.log("⏳ TX SENT:", tx.hash);
+    console.log("🚀 TX:", tx.hash);
 
     res.json({
       success: true,
@@ -148,9 +148,9 @@ app.post("/withdraw", async (req, res) => {
     });
 
   } catch (err) {
-    console.log("❌ WITHDRAW ERROR:", err);
+    console.log("❌ ERROR:", err);
 
-    res.status(200).json({
+    res.json({
       success: false,
       error: err.message
     });
@@ -159,5 +159,5 @@ app.post("/withdraw", async (req, res) => {
 
 /* ================= START ================= */
 app.listen(process.env.PORT || 3000, () => {
-  console.log(`🚀 Server running on port ${process.env.PORT}`);
+  console.log("🚀 Server running");
 });
